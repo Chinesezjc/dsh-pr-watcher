@@ -23,7 +23,7 @@ jobs:
           version: 11
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --config.auto-install-peers=false
+        run: pnpm install --frozen-lockfile
 
       - name: Check
         run: pnpm run check
