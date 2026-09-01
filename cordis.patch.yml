@@ -1,0 +1,16 @@
+# dsh-pr-watcher bundle patch: mount the host watcher service and the
+# model-facing tools. Watches are configured per deployment in the profile
+# overlay (Config.watches) or registered at runtime through pr_watch; no watch
+# or repository name is baked into the bundle.
+- insert:
+    - id: pr-watcher
+      name: dsh-pr-watcher/pr-watcher
+      config:
+        pollIntervalMs: 60000
+        ghPath: gh
+        delivery: inject
+        allowResume: false
+        notifySessionId: ""
+
+    - id: tool-pr-watcher
+      name: dsh-pr-watcher/tool-pr-watcher
