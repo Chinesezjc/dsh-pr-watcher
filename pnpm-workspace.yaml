@@ -1,3 +1,5 @@
+onlyBuiltDependencies:
+  - esbuild
 minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent@0.1.2-alpha.3'
   - '@deepseek-ai/dsh-brand@0.1.2-alpha.3'
