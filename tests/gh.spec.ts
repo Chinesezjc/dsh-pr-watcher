@@ -90,7 +90,25 @@ describe('snapshotFromGraphql', () => {
       issueComments: 1,
       unresolvedThreads: 1,
       checks: { total: 4, passed: 1, failed: 1, pending: 2 },
+      failedChecks: ['lint'],
     })
+  })
+
+  it('collects failing run names from both CheckRun and StatusContext', () => {
+    const snapshot = snapshotFromGraphql('example-org/example-repo', 1, fixture({
+      statusCheckRollup: {
+        state: 'FAILURE',
+        contexts: {
+          totalCount: 3,
+          nodes: [
+            { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' },
+            { __typename: 'StatusContext', context: 'ci/gate', state: 'ERROR' },
+            { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+          ],
+        },
+      },
+    }))
+    expect(snapshot.failedChecks).toEqual(['lint', 'ci/gate'])
   })
 
   it('throws when the repository or PR does not exist', () => {

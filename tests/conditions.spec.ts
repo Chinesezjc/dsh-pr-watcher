@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     issueComments: 0,
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
+    failedChecks: [],
     ...overrides,
   }
 }
@@ -38,6 +39,7 @@ describe('evaluateConditions', () => {
     const result = evaluateConditions(snapshot())
     expect(result).toEqual({
       checksPassed: true,
+      checksFailed: false,
       threadsResolved: true,
       mergeable: true,
       reviewApproved: true,
@@ -49,6 +51,15 @@ describe('evaluateConditions', () => {
   it('checksPassed fails on any failed or pending check', () => {
     expect(evaluateConditions(snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 } })).checksPassed).toBe(false)
     expect(evaluateConditions(snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } })).checksPassed).toBe(false)
+  })
+
+  it('checksFailed holds on any failed check and is exclusive with checksPassed', () => {
+    const red = evaluateConditions(snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 } }))
+    expect(red.checksFailed).toBe(true)
+    expect(red.checksPassed).toBe(false)
+    const green = evaluateConditions(snapshot())
+    expect(green.checksFailed).toBe(false)
+    expect(green.checksPassed).toBe(true)
   })
 
   it('threadsResolved fails on unresolved threads', () => {
@@ -92,7 +103,7 @@ describe('conditionsMet', () => {
 describe('diffSnapshots', () => {
   const base = snapshot()
 
-  it('reports positive deltas only', () => {
+  it('reports positive deltas for activity counts', () => {
     const next = snapshot({ commits: 4, reviews: 3, reviewThreads: 2, reviewComments: 5, issueComments: 1 })
     expect(diffSnapshots(base, next)).toEqual({
       headRefOid: null,
@@ -102,13 +113,32 @@ describe('diffSnapshots', () => {
       reviewThreads: 2,
       reviewComments: 5,
       issueComments: 1,
+      checks: { passed: 0, failed: 0, pending: 0 },
+      newlyFailedChecks: [],
     })
   })
 
-  it('never reports negative deltas', () => {
+  it('never reports negative activity deltas', () => {
     const next = snapshot({ commits: 0, reviews: 0 })
     expect(diffSnapshots(base, next).commits).toBe(0)
     expect(diffSnapshots(base, next).reviews).toBe(0)
+  })
+
+  it('reports signed check-run state deltas and newly failed names', () => {
+    const before = snapshot({ checks: { total: 3, passed: 1, failed: 0, pending: 2 } })
+    const after = snapshot({
+      checks: { total: 3, passed: 2, failed: 1, pending: 0 },
+      failedChecks: ['lint', 'test'],
+    })
+    const diff = diffSnapshots(before, after)
+    expect(diff.checks).toEqual({ passed: 1, failed: 1, pending: -2 })
+    expect(diff.newlyFailedChecks).toEqual(['lint', 'test'])
+    // A check that was already failing in the previous snapshot is not "newly failed".
+    const stillRed = diffSnapshots(
+      snapshot({ checks: { total: 2, passed: 0, failed: 1, pending: 1 }, failedChecks: ['lint'] }),
+      snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint', 'test'] }),
+    )
+    expect(stillRed.newlyFailedChecks).toEqual(['test'])
   })
 
   it('flags a moved head ref', () => {
@@ -123,6 +153,17 @@ describe('hasChanges / renderChanges', () => {
   it('null and empty diffs are not changes', () => {
     expect(hasChangesGuard(null)).toBe(false)
     expect(hasChanges(diffSnapshots(snapshot(), snapshot()))).toBe(false)
+  })
+
+  it('counts a check-run state transition as a change', () => {
+    const diff = diffSnapshots(
+      snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
+      snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] }),
+    )
+    expect(hasChanges(diff)).toBe(true)
+    const line = renderChanges(diff)
+    expect(line).toContain('checks: +1 failed, -1 pending')
+    expect(line).toContain('newly failed: lint')
   })
 
   it('renders a compact changes line', () => {
@@ -155,6 +196,8 @@ describe('buildNotificationText', () => {
       reviewThreads: 0,
       reviewComments: 0,
       issueComments: 0,
+      checks: { passed: 0, failed: 0, pending: 0 },
+      newlyFailedChecks: [],
     })
     expect(text).toContain('PR watch "watch-1" changed')
     expect(text).toContain('+1 commit')

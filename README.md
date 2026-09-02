@@ -35,9 +35,12 @@ name is baked into this plugin.
   flip from not-satisfied to satisfied, then never again for that watch.
 - With `notifyChanges: true`, the watch also delivers a change notification
   whenever a poll observes new commits, new reviews, new review threads, new
-  review comments, or new issue comments — before the conditions are met.
-  A poll that both satisfies the conditions and observes changes sends one
-  combined message.
+  review comments, new issue comments, or a check-run state transition
+  (pending → failed / passed). Check deltas are signed and the newly failed
+  check names are included, so a CI failure surfaces as
+  `changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that
+  both satisfies the conditions and observes changes sends one combined
+  message.
 - Notifications are delivered to the target session's inbox with the standard
   agent handoff modes (`inject` seeds context without waking an idle agent;
   `followup` queues its own turn; `steer` cuts into the nearest step
@@ -50,15 +53,18 @@ name is baked into this plugin.
 | Condition | Holds when |
 | --- | --- |
 | `checksPassed` | no failed and no pending checks (fully settled; a PR with no checks satisfies vacuously) |
+| `checksFailed` | at least one check failed (CI is red) |
 | `threadsResolved` | no unresolved review threads |
 | `mergeable` | GitHub reports `MERGEABLE` |
 | `reviewApproved` | review decision is `APPROVED` |
 | `merged` | PR state is `MERGED` |
 | `closed` | PR state is `CLOSED` |
 
-`merged` and `closed` are mutually exclusive and rejected together. The default
-selection for new watches is the "ready" set — `checksPassed`,
-`threadsResolved`, `mergeable`, `reviewApproved` — without the terminal states.
+`merged`+`closed` and `checksPassed`+`checksFailed` are mutually exclusive
+pairs and rejected together. The default selection for new watches is the
+"ready" set — `checksPassed`, `threadsResolved`, `mergeable`,
+`reviewApproved` — without the terminal states and without the CI-failure
+trigger. Use `checksFailed` alone for a "CI broke, intervene now" watch.
 
 The CI check counts follow the "non-pass" convention: `failed` counts only bad
 conclusions/states (`FAILURE`, `ERROR`, `CANCELLED`, `TIMED_OUT`,

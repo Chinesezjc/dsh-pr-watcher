@@ -12,6 +12,7 @@
  */
 export const CONDITION_NAMES = [
   'checksPassed',
+  'checksFailed',
   'threadsResolved',
   'mergeable',
   'reviewApproved',
@@ -26,7 +27,7 @@ export function isConditionName(value: string): value is ConditionName {
 
 /**
  * The default condition selection for new watches: the "ready" set, without
- * the mutually exclusive merged/closed terminal states.
+ * the terminal states and without the CI-failure trigger.
  */
 export const DEFAULT_CONDITIONS: readonly ConditionName[] = [
   'checksPassed',
@@ -87,7 +88,8 @@ export interface CheckSummary {
  * (FAILURE, ERROR, CANCELLED, TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE,
  * STALE); `checks.pending` counts not-yet-settled runs (QUEUED, IN_PROGRESS,
  * REQUESTED, WAITING, PENDING, EXPECTED, or a null conclusion). A PR with no
- * checks reports 0/0/0/0.
+ * checks reports 0/0/0/0. `failedChecks` names the failing runs (CheckRun
+ * `name` / StatusContext `context`) in rollup order.
  */
 export interface PrSnapshot {
   readonly repo: string
@@ -106,14 +108,17 @@ export interface PrSnapshot {
   readonly issueComments: number
   readonly unresolvedThreads: number
   readonly checks: CheckSummary
+  readonly failedChecks: readonly string[]
 }
 
 /** Truth value of every evaluable condition for one snapshot. */
 export type ConditionResult = Record<ConditionName, boolean>
 
 /**
- * What increased between two consecutive snapshots of the same PR. A null
- * field means "unchanged"; a count is the positive delta.
+ * What changed between two consecutive snapshots of the same PR. A null field
+ * means "unchanged"; a count is the signed delta (negative means decreased).
+ * `checks` carries the signed per-state check deltas, so check-run transitions
+ * (pending → failed / passed) surface as change notifications.
  */
 export interface ChangeSummary {
   /** New head commit oid when the head ref moved. */
@@ -125,6 +130,14 @@ export interface ChangeSummary {
   readonly reviewThreads: number
   readonly reviewComments: number
   readonly issueComments: number
+  /** Signed per-state check count deltas. */
+  readonly checks: {
+    readonly passed: number
+    readonly failed: number
+    readonly pending: number
+  }
+  /** Check names that failed in the new snapshot but did not fail before. */
+  readonly newlyFailedChecks: readonly string[]
 }
 
 /** Whether a change summary contains any observed change. */
@@ -136,6 +149,10 @@ export function hasChanges(change: ChangeSummary | null): boolean {
     || change.reviewThreads > 0
     || change.reviewComments > 0
     || change.issueComments > 0
+    || change.checks.passed !== 0
+    || change.checks.failed !== 0
+    || change.checks.pending !== 0
+    || change.newlyFailedChecks.length > 0
   )
 }
 

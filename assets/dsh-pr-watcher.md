@@ -33,6 +33,7 @@ not-satisfied to satisfied, then never again for that watch.
 | Condition | Holds when |
 | --- | --- |
 | `checksPassed` | no failed and no pending checks (fully settled; a PR with no checks satisfies vacuously) |
+| `checksFailed` | at least one check failed (CI is red) |
 | `threadsResolved` | no unresolved review threads |
 | `mergeable` | GitHub reports `MERGEABLE` |
 | `reviewApproved` | review decision is `APPROVED` |
@@ -41,16 +42,20 @@ not-satisfied to satisfied, then never again for that watch.
 
 The default selection is the "ready" set: `checksPassed`, `threadsResolved`,
 `mergeable`, `reviewApproved`. `merged` and `closed` are mutually exclusive and
-cannot be combined. `checksPassed` means fully settled (failed=0 AND
-pending=0) — pending checks do NOT count as satisfied.
+cannot be combined; so are `checksPassed` and `checksFailed`. `checksPassed`
+means fully settled (failed=0 AND pending=0) — pending checks do NOT count as
+satisfied. Use `checksFailed` alone for a "CI broke, intervene now" trigger:
+the watch satisfies the moment any check fails.
 
 ## Change notifications
 
 With `notifyChanges: true`, the watch also delivers a change notification
 whenever a poll observes new commits, new reviews, new review threads, new
-review comments, or new issue comments — before the conditions are met. A poll
-that both satisfies the conditions and observes changes sends ONE combined
-message.
+review comments, new issue comments, or a **check-run state transition**
+(pending → failed / passed). Check deltas are signed and the newly failed
+check names are included, so a CI failure surfaces as
+`changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that both
+satisfies the conditions and observes changes sends ONE combined message.
 
 ## Delivery
 
@@ -86,6 +91,16 @@ A satisfied watch never notifies again. To track a later phase, register a
 second watch. For example, after a ready-watch fires (checks green, threads
 resolved, mergeable, approved), register a `conditions: ["merged"]` watch to
 learn when the PR actually merges.
+
+### CI monitoring patterns
+
+- **Hear about every CI transition, including red**: register the ready set
+  with `notifyChanges: true`. Every check-run flip (pending → failed/passed)
+  delivers a change notification naming the newly failed checks, and the final
+  all-green state delivers the satisfied notification.
+- **Only be told when CI breaks**: register `conditions: ["checksFailed"]`.
+  The watch satisfies the moment any check fails and notifies once; the
+  notification shows the failing check names.
 
 ## Notification shape
 

@@ -25,6 +25,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     issueComments: 0,
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
+    failedChecks: [],
     ...overrides,
   }
 }
@@ -82,6 +83,22 @@ describe('tool-pr-watcher', () => {
     const text = (rendered as { text: string }[])[0]!.text
     expect(text).toContain('example-org/example-repo#1 OPEN')
     expect(text).toContain('checks: 0 failed, 0 pending of 1')
+    await dispose()
+  })
+
+  it('pr_status renders the failing check names', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_status')!
+    const rendered = tool.output!.render!(
+      { repo: 'example-org/example-repo', number: 1 },
+      {
+        ok: true,
+        snapshot: { ...snapshot(), checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] },
+      } as never,
+    )
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('failed checks: lint')
     await dispose()
   })
 

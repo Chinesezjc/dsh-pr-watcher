@@ -28,6 +28,7 @@ function snapshotLines(snapshot: PrSnapshot): string[] {
     `checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checks.total}`,
     `review threads: ${snapshot.unresolvedThreads} unresolved of ${snapshot.reviewThreads}`,
   ]
+  if (snapshot.failedChecks.length > 0) lines.push(`failed checks: ${snapshot.failedChecks.join(', ')}`)
   if (snapshot.mergeable !== null) lines.push(`mergeable: ${snapshot.mergeable}`)
   if (snapshot.reviewDecision !== null) lines.push(`review decision: ${snapshot.reviewDecision}`)
   lines.push(`head: ${snapshot.headRefName} @ ${snapshot.headRefOid}`)
@@ -90,6 +91,7 @@ export function apply(ctx: Context): void {
               reviewComments: { type: 'number', required: true },
               issueComments: { type: 'number', required: true },
               unresolvedThreads: { type: 'number', required: true },
+              failedChecks: { type: 'array', items: { type: 'string' }, required: true },
               checks: {
                 type: 'object',
                 additionalProperties: false,
@@ -149,8 +151,11 @@ export function apply(ctx: Context): void {
       conditions: {
         type: 'array',
         items: { type: 'string', enum: CONDITION_ENUM },
-        description: 'Conditions ANDed for the satisfied notification; defaults to all of: '
-          + CONDITION_ENUM.join(', '),
+        description: 'Conditions ANDed for the satisfied notification. Valid values: '
+          + CONDITION_ENUM.join(', ')
+          + '. Defaults to the ready set: checksPassed, threadsResolved, mergeable, reviewApproved. '
+          + 'Use checksFailed alone to be notified once when CI turns red. '
+          + 'merged+closed and checksPassed+checksFailed are contradictory pairs and are rejected.',
       },
       notifyChanges: {
         type: 'boolean',

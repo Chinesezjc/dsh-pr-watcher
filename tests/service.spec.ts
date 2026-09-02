@@ -23,6 +23,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     issueComments: 0,
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
+    failedChecks: [],
     ...overrides,
   }
 }
@@ -136,6 +137,14 @@ describe('config watch validation', () => {
     }, /cannot include both merged and closed/)
   })
 
+  it('rejects contradictory checksPassed+checksFailed conditions', async () => {
+    const ctx = new Context()
+    ctx.provide('agents', fakeAgents() as never)
+    await expectPluginThrows(ctx, {
+      watches: [{ id: 'checks', repo: 'example-org/example-repo', number: 1, sessionId: 'sess-1', conditions: ['checksPassed', 'checksFailed'] }],
+    }, /cannot include both checksPassed and checksFailed/)
+  })
+
   it('rejects malformed repository references', async () => {
     const ctx = new Context()
     ctx.provide('agents', fakeAgents() as never)
@@ -226,6 +235,49 @@ describe('poll transitions', () => {
     const text = delivered.get('sess-1')![0]!
     expect(text).toContain('conditions met')
     expect(text).toContain('+1 commit')
+    await dispose()
+  })
+
+  it('notifies when a check-run turns red (notifyChanges covers check state)', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'ci-red', notifyChanges: true })
+    const seq = [
+      snapshot({ checks: { total: 2, passed: 0, failed: 0, pending: 2 } }),
+      snapshot({ checks: { total: 2, passed: 0, failed: 1, pending: 1 }, failedChecks: ['lint'] }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    const text = delivered.get('sess-1')![0]!
+    expect(text).toContain('changed')
+    expect(text).toContain('checks: +1 failed, -1 pending')
+    expect(text).toContain('newly failed: lint')
+    expect(text).not.toContain('conditions met')
+    await dispose()
+  })
+
+  it('a checksFailed-condition watch satisfies once CI turns red', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'ci-broken', conditions: ['checksFailed'], notifyChanges: false })
+    const seq = [
+      snapshot(),
+      snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] }),
+      snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(delivered.get('sess-1')![0]).toContain('conditions met')
+    expect(service.list()[0]!.satisfied).toBe(true)
+    // No repeat notification while still red.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
     await dispose()
   })
 

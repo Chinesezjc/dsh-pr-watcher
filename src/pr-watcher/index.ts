@@ -243,6 +243,9 @@ export class PrWatcherService extends Service {
     if (conditions.includes('merged') && conditions.includes('closed')) {
       throw new Error('pr-watcher: conditions cannot include both merged and closed')
     }
+    if (conditions.includes('checksPassed') && conditions.includes('checksFailed')) {
+      throw new Error('pr-watcher: conditions cannot include both checksPassed and checksFailed')
+    }
     for (const name of conditions) {
       if (!isConditionName(name)) {
         throw new Error(`pr-watcher: unknown condition "${name}"`)

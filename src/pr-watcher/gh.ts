@@ -119,6 +119,8 @@ export async function ghGraphql(
 /** Raw GraphQL shape of one statusCheckRollup item. */
 interface RollupItem {
   __typename?: string
+  name?: string | null
+  context?: string | null
   status?: string | null
   conclusion?: string | null
   state?: string | null
@@ -156,19 +158,31 @@ function numberOr(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-function countChecks(items: (RollupItem | null)[]): CheckSummary {
+/** A failing rollup item's display name: CheckRun `name` or StatusContext `context`. */
+function rollupItemName(item: RollupItem): string {
+  return item.__typename === 'StatusContext'
+    ? (item.context ?? '')
+    : (item.name ?? '')
+}
+
+/** Roll up the per-item check states into counts plus the names of failing runs. */
+function summarizeChecks(items: (RollupItem | null)[]): { checks: CheckSummary; failedChecks: string[] } {
   let total = 0
   let passed = 0
   let failed = 0
   let pending = 0
+  const failedChecks: string[] = []
   for (const item of items) {
     if (item === null || item === undefined) continue
     total += 1
     if (item.__typename === 'StatusContext') {
       const state = item.state
       if (state !== undefined && state !== null) {
-        if (FAILED_STATES.has(state)) failed += 1
-        else if (PENDING_STATES.has(state)) pending += 1
+        if (FAILED_STATES.has(state)) {
+          failed += 1
+          const name = rollupItemName(item)
+          if (name !== '') failedChecks.push(name)
+        } else if (PENDING_STATES.has(state)) pending += 1
         else if (state === 'SUCCESS') passed += 1
       }
       continue
@@ -177,6 +191,8 @@ function countChecks(items: (RollupItem | null)[]): CheckSummary {
     const conclusion = item.conclusion
     if (conclusion !== undefined && conclusion !== null && FAILED_CONCLUSIONS.has(conclusion)) {
       failed += 1
+      const name = rollupItemName(item)
+      if (name !== '') failedChecks.push(name)
       continue
     }
     if (status !== undefined && status !== null && PENDING_STATUSES.has(status)) {
@@ -189,7 +205,7 @@ function countChecks(items: (RollupItem | null)[]): CheckSummary {
     }
     if (conclusion === 'SUCCESS' && status === 'COMPLETED') passed += 1
   }
-  return { total, passed, failed, pending }
+  return { checks: { total, passed, failed, pending }, failedChecks }
 }
 
 function normalizeState(value: string | null | undefined): 'OPEN' | 'MERGED' | 'CLOSED' {
@@ -230,7 +246,7 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
     if (node.isResolved === false) unresolvedThreads += 1
     reviewComments += numberOr(node.comments?.totalCount, 0)
   }
-  const checks = countChecks(pullRequest.statusCheckRollup?.contexts?.nodes ?? [])
+  const { checks, failedChecks } = summarizeChecks(pullRequest.statusCheckRollup?.contexts?.nodes ?? [])
   return {
     repo,
     number,
@@ -248,5 +264,6 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
     issueComments: numberOr(pullRequest.comments?.totalCount, 0),
     unresolvedThreads,
     checks,
+    failedChecks,
   }
 }

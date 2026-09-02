@@ -1,7 +1,7 @@
 {
   "name": "dsh-pr-watcher",
   "description": "GitHub pull-request watcher for DeepSeek Harness (DSH): a host service that polls PR status through the gh CLI and notifies agent sessions when configured conditions are met, plus model-facing tools to query and register watches.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

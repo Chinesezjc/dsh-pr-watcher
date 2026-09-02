@@ -15,6 +15,9 @@ export { hasChanges } from './types.ts'
  *   settled). A PR with no checks at all reports 0/0/0/0 and satisfies
  *   vacuously; the notification text shows the counts so the receiver can see
  *   that the PR carries no checks.
+ * - `checksFailed` — at least one check failed. Mutually exclusive with
+ *   `checksPassed` (a watch selecting both never satisfies and is rejected at
+ *   load). Use for a "CI broke, intervene now" trigger.
  * - `threadsResolved` — no unresolved review threads.
  * - `mergeable` — GitHub reports `MERGEABLE`.
  * - `reviewApproved` — review decision is `APPROVED`.
@@ -24,6 +27,7 @@ export { hasChanges } from './types.ts'
 export function evaluateConditions(snapshot: PrSnapshot): ConditionResult {
   return {
     checksPassed: snapshot.checks.failed === 0 && snapshot.checks.pending === 0,
+    checksFailed: snapshot.checks.failed > 0,
     threadsResolved: snapshot.unresolvedThreads === 0,
     mergeable: snapshot.mergeable === 'MERGEABLE',
     reviewApproved: snapshot.reviewDecision === 'APPROVED',
@@ -45,9 +49,10 @@ export function conditionsMet(conditions: readonly ConditionName[], result: Cond
  * Diff two consecutive snapshots of the same PR.
  * @param prev - the earlier snapshot.
  * @param next - the later snapshot.
- * @returns the deltas; null fields mean unchanged, counts are positive deltas.
+ * @returns the deltas; null fields mean unchanged, counts are signed deltas.
  */
 export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary {
+  const prevFailed = new Set(prev.failedChecks)
   return {
     headRefOid: prev.headRefOid !== next.headRefOid ? next.headRefOid : null,
     headRefName: prev.headRefName !== next.headRefName ? next.headRefName : null,
@@ -56,11 +61,22 @@ export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary
     reviewThreads: Math.max(0, next.reviewThreads - prev.reviewThreads),
     reviewComments: Math.max(0, next.reviewComments - prev.reviewComments),
     issueComments: Math.max(0, next.issueComments - prev.issueComments),
+    checks: {
+      passed: next.checks.passed - prev.checks.passed,
+      failed: next.checks.failed - prev.checks.failed,
+      pending: next.checks.pending - prev.checks.pending,
+    },
+    newlyFailedChecks: next.failedChecks.filter((name) => !prevFailed.has(name)),
   }
 }
 
 function shortOid(oid: string): string {
   return oid.length > 8 ? oid.slice(0, 8) : oid
+}
+
+/** Render a signed check delta as `+N failed` / `-1 pending`. */
+function signedCount(delta: number, label: string): string {
+  return delta > 0 ? `+${delta} ${label}` : `${delta} ${label}`
 }
 
 /** Render a `ChangeSummary` as a compact `changes:` line, empty when nothing changed. */
@@ -74,6 +90,14 @@ export function renderChanges(change: ChangeSummary): string {
   if (change.reviewThreads > 0) parts.push(`+${change.reviewThreads} review thread${change.reviewThreads === 1 ? '' : 's'}`)
   if (change.reviewComments > 0) parts.push(`+${change.reviewComments} review comment${change.reviewComments === 1 ? '' : 's'}`)
   if (change.issueComments > 0) parts.push(`+${change.issueComments} issue comment${change.issueComments === 1 ? '' : 's'}`)
+  const checkParts: string[] = []
+  if (change.checks.failed !== 0) checkParts.push(signedCount(change.checks.failed, 'failed'))
+  if (change.checks.pending !== 0) checkParts.push(signedCount(change.checks.pending, 'pending'))
+  if (change.checks.passed !== 0) checkParts.push(signedCount(change.checks.passed, 'passed'))
+  if (checkParts.length > 0) parts.push(`checks: ${checkParts.join(', ')}`)
+  if (change.newlyFailedChecks.length > 0) {
+    parts.push(`newly failed: ${change.newlyFailedChecks.join(', ')}`)
+  }
   return parts.length === 0 ? '' : `changes: ${parts.join(', ')}`
 }
 
