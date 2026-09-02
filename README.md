@@ -80,7 +80,7 @@ vacuous zero-check result.
 dsh plugin --profile <profile> add dsh-pr-watcher
 ```
 
-The bundle patch mounts the service and the tools:
+The bundle patch mounts the service, the tools, and a companion skill:
 
 ```yaml
 # cordis.patch.yml (shipped with the bundle)
@@ -96,7 +96,15 @@ The bundle patch mounts the service and the tools:
 
     - id: tool-pr-watcher
       name: dsh-pr-watcher/tool-pr-watcher
+
+    - id: skill-pr-watcher
+      name: dsh-pr-watcher/skill-pr-watcher
 ```
+
+The `skill-pr-watcher` row registers the bundled `dsh-pr-watcher` skill
+(`assets/dsh-pr-watcher.md`) with the skill registry, so agents that mount the
+skill see usage guidance for the tools. It activates only when the `prWatcher`
+service is present.
 
 Static watches go in the profile overlay that overrides the bundle patch:
 

@@ -1,7 +1,7 @@
-# dsh-pr-watcher bundle patch: mount the host watcher service and the
-# model-facing tools. Watches are configured per deployment in the profile
-# overlay (Config.watches) or registered at runtime through pr_watch; no watch
-# or repository name is baked into the bundle.
+# dsh-pr-watcher bundle patch: mount the host watcher service, the
+# model-facing tools, and the companion skill. Watches are configured per
+# deployment in the profile overlay (Config.watches) or registered at runtime
+# through pr_watch; no watch or repository name is baked into the bundle.
 - insert:
     - id: pr-watcher
       name: dsh-pr-watcher/pr-watcher
@@ -14,3 +14,6 @@
 
     - id: tool-pr-watcher
       name: dsh-pr-watcher/tool-pr-watcher
+
+    - id: skill-pr-watcher
+      name: dsh-pr-watcher/skill-pr-watcher

@@ -17,6 +17,7 @@ const dshExternal = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-*']
 for (const [entry, outfile] of [
   ['src/pr-watcher/index.ts', 'lib/pr-watcher/index.js'],
   ['src/tool-pr-watcher/index.ts', 'lib/tool-pr-watcher/index.js'],
+  ['src/skill-pr-watcher/index.ts', 'lib/skill-pr-watcher/index.js'],
 ]) {
   await build({
     entryPoints: [entry],
