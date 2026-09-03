@@ -15,6 +15,7 @@ export const CONDITION_NAMES = [
   'checksFailed',
   'threadsResolved',
   'mergeable',
+  'conflicted',
   'reviewApproved',
   'merged',
   'closed',
@@ -138,6 +139,11 @@ export interface ChangeSummary {
   }
   /** Check names that failed in the new snapshot but did not fail before. */
   readonly newlyFailedChecks: readonly string[]
+  /** Mergeable-state transition (e.g. MERGEABLE → CONFLICTING), or null when unchanged. */
+  readonly mergeable: {
+    readonly from: PrSnapshot['mergeable']
+    readonly to: PrSnapshot['mergeable']
+  } | null
 }
 
 /** Whether a change summary contains any observed change. */
@@ -153,6 +159,7 @@ export function hasChanges(change: ChangeSummary | null): boolean {
     || change.checks.failed !== 0
     || change.checks.pending !== 0
     || change.newlyFailedChecks.length > 0
+    || change.mergeable !== null
   )
 }
 

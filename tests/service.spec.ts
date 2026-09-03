@@ -145,6 +145,14 @@ describe('config watch validation', () => {
     }, /cannot include both checksPassed and checksFailed/)
   })
 
+  it('rejects contradictory mergeable+conflicted conditions', async () => {
+    const ctx = new Context()
+    ctx.provide('agents', fakeAgents() as never)
+    await expectPluginThrows(ctx, {
+      watches: [{ id: 'conflict', repo: 'example-org/example-repo', number: 1, sessionId: 'sess-1', conditions: ['mergeable', 'conflicted'] }],
+    }, /cannot include both mergeable and conflicted/)
+  })
+
   it('rejects malformed repository references', async () => {
     const ctx = new Context()
     ctx.provide('agents', fakeAgents() as never)
@@ -276,6 +284,30 @@ describe('poll transitions', () => {
     expect(delivered.get('sess-1')![0]).toContain('conditions met')
     expect(service.list()[0]!.satisfied).toBe(true)
     // No repeat notification while still red.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    await dispose()
+  })
+
+  it('a conflicted-condition watch satisfies when the PR needs a merge-forward', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'stack-member', conditions: ['conflicted'], notifyChanges: true })
+    const seq = [
+      snapshot({ mergeable: 'MERGEABLE' }),
+      snapshot({ mergeable: 'CONFLICTING' }),
+      snapshot({ mergeable: 'CONFLICTING' }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    const text = delivered.get('sess-1')![0]!
+    expect(text).toContain('conditions met')
+    expect(text).toContain('mergeable: MERGEABLE -> CONFLICTING')
+    expect(service.list()[0]!.satisfied).toBe(true)
+    // Already satisfied; the mergeable transition also fired once via the change path.
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)
     await dispose()

@@ -246,6 +246,9 @@ export class PrWatcherService extends Service {
     if (conditions.includes('checksPassed') && conditions.includes('checksFailed')) {
       throw new Error('pr-watcher: conditions cannot include both checksPassed and checksFailed')
     }
+    if (conditions.includes('mergeable') && conditions.includes('conflicted')) {
+      throw new Error('pr-watcher: conditions cannot include both mergeable and conflicted')
+    }
     for (const name of conditions) {
       if (!isConditionName(name)) {
         throw new Error(`pr-watcher: unknown condition "${name}"`)

@@ -19,7 +19,12 @@ export { hasChanges } from './types.ts'
  *   `checksPassed` (a watch selecting both never satisfies and is rejected at
  *   load). Use for a "CI broke, intervene now" trigger.
  * - `threadsResolved` — no unresolved review threads.
- * - `mergeable` — GitHub reports `MERGEABLE`.
+ * - `mergeable` — GitHub reports `MERGEABLE`. Mutually exclusive with
+ *   `conflicted` (a watch selecting both never satisfies and is rejected at
+ *   load).
+ * - `conflicted` — GitHub reports `CONFLICTING` (the PR needs a merge-forward
+ *   against its base). Use for a stack watch that notifies the moment a member
+ *   branch falls out of sync with its base.
  * - `reviewApproved` — review decision is `APPROVED`.
  * - `merged` — PR state is `MERGED`.
  * - `closed` — PR state is `CLOSED` (GitHub's CLOSED never overlaps MERGED).
@@ -30,6 +35,7 @@ export function evaluateConditions(snapshot: PrSnapshot): ConditionResult {
     checksFailed: snapshot.checks.failed > 0,
     threadsResolved: snapshot.unresolvedThreads === 0,
     mergeable: snapshot.mergeable === 'MERGEABLE',
+    conflicted: snapshot.mergeable === 'CONFLICTING',
     reviewApproved: snapshot.reviewDecision === 'APPROVED',
     merged: snapshot.state === 'MERGED',
     closed: snapshot.state === 'CLOSED',
@@ -67,6 +73,9 @@ export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary
       pending: next.checks.pending - prev.checks.pending,
     },
     newlyFailedChecks: next.failedChecks.filter((name) => !prevFailed.has(name)),
+    mergeable: prev.mergeable === next.mergeable
+      ? null
+      : { from: prev.mergeable, to: next.mergeable },
   }
 }
 
@@ -97,6 +106,11 @@ export function renderChanges(change: ChangeSummary): string {
   if (checkParts.length > 0) parts.push(`checks: ${checkParts.join(', ')}`)
   if (change.newlyFailedChecks.length > 0) {
     parts.push(`newly failed: ${change.newlyFailedChecks.join(', ')}`)
+  }
+  if (change.mergeable !== null) {
+    const from = change.mergeable.from ?? 'UNKNOWN'
+    const to = change.mergeable.to ?? 'UNKNOWN'
+    parts.push(`mergeable: ${from} -> ${to}`)
   }
   return parts.length === 0 ? '' : `changes: ${parts.join(', ')}`
 }

@@ -36,23 +36,26 @@ not-satisfied to satisfied, then never again for that watch.
 | `checksFailed` | at least one check failed (CI is red) |
 | `threadsResolved` | no unresolved review threads |
 | `mergeable` | GitHub reports `MERGEABLE` |
+| `conflicted` | GitHub reports `CONFLICTING` (the PR needs a merge-forward against its base) |
 | `reviewApproved` | review decision is `APPROVED` |
 | `merged` | PR state is `MERGED` |
 | `closed` | PR state is `CLOSED` |
 
 The default selection is the "ready" set: `checksPassed`, `threadsResolved`,
-`mergeable`, `reviewApproved`. `merged` and `closed` are mutually exclusive and
-cannot be combined; so are `checksPassed` and `checksFailed`. `checksPassed`
-means fully settled (failed=0 AND pending=0) — pending checks do NOT count as
-satisfied. Use `checksFailed` alone for a "CI broke, intervene now" trigger:
-the watch satisfies the moment any check fails.
+`mergeable`, `reviewApproved`. `merged`+`closed`, `checksPassed`+`checksFailed`,
+and `mergeable`+`conflicted` are mutually exclusive pairs and cannot be
+combined. `checksPassed` means fully settled (failed=0 AND pending=0) —
+pending checks do NOT count as satisfied. Use `checksFailed` alone for a "CI
+broke, intervene now" trigger, and `conflicted` alone to be notified the
+moment a merge-forward against the base becomes necessary.
 
 ## Change notifications
 
 With `notifyChanges: true`, the watch also delivers a change notification
 whenever a poll observes new commits, new reviews, new review threads, new
-review comments, new issue comments, or a **check-run state transition**
-(pending → failed / passed). Check deltas are signed and the newly failed
+review comments, new issue comments, a **check-run state transition**
+(pending → failed / passed), or a **mergeable-state transition** (e.g.
+`MERGEABLE -> CONFLICTING`). Check deltas are signed and the newly failed
 check names are included, so a CI failure surfaces as
 `changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that both
 satisfies the conditions and observes changes sends ONE combined message.
@@ -101,6 +104,26 @@ learn when the PR actually merges.
 - **Only be told when CI breaks**: register `conditions: ["checksFailed"]`.
   The watch satisfies the moment any check fails and notifies once; the
   notification shows the failing check names.
+
+### Stack conflict handling
+
+A `conflicted` notification (or a change notification reading
+`mergeable: MERGEABLE -> CONFLICTING`) means the branch fell behind its base
+and a merge-forward is required. Resolve it before doing anything else:
+
+1. `git fetch origin` and identify the REAL base head with
+   `gh pr view <base-pr> --json headRefOid` — never trust a stale local
+   `origin/master`.
+2. Merge the base into the current branch: `git merge <base-head>`, resolve the
+   conflicts file by file.
+3. Commit the resolution. The resolution commit MUST change at least one
+   tracked file relative to its parent. An empty commit
+   (`git commit --allow-empty`) is never a resolution and is a workflow
+   violation — if you have produced one, undo it with `git reset --soft HEAD^`
+   and redo the step. Do not use `git commit --no-verify` to bypass checks.
+4. Push with a plain `git push` and re-check the mergeable state with
+   `pr_status`; the conflict clears only when GitHub recomputes the PR as
+   `MERGEABLE`.
 
 ## Notification shape
 

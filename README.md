@@ -35,8 +35,9 @@ name is baked into this plugin.
   flip from not-satisfied to satisfied, then never again for that watch.
 - With `notifyChanges: true`, the watch also delivers a change notification
   whenever a poll observes new commits, new reviews, new review threads, new
-  review comments, new issue comments, or a check-run state transition
-  (pending → failed / passed). Check deltas are signed and the newly failed
+  review comments, new issue comments, a check-run state transition
+  (pending → failed / passed), or a mergeable-state transition (e.g.
+  `MERGEABLE -> CONFLICTING`). Check deltas are signed and the newly failed
   check names are included, so a CI failure surfaces as
   `changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that
   both satisfies the conditions and observes changes sends one combined
@@ -56,15 +57,18 @@ name is baked into this plugin.
 | `checksFailed` | at least one check failed (CI is red) |
 | `threadsResolved` | no unresolved review threads |
 | `mergeable` | GitHub reports `MERGEABLE` |
+| `conflicted` | GitHub reports `CONFLICTING` (the PR needs a merge-forward against its base) |
 | `reviewApproved` | review decision is `APPROVED` |
 | `merged` | PR state is `MERGED` |
 | `closed` | PR state is `CLOSED` |
 
-`merged`+`closed` and `checksPassed`+`checksFailed` are mutually exclusive
-pairs and rejected together. The default selection for new watches is the
-"ready" set — `checksPassed`, `threadsResolved`, `mergeable`,
-`reviewApproved` — without the terminal states and without the CI-failure
-trigger. Use `checksFailed` alone for a "CI broke, intervene now" watch.
+`merged`+`closed`, `checksPassed`+`checksFailed`, and `mergeable`+`conflicted`
+are mutually exclusive pairs and rejected together. The default selection for
+new watches is the "ready" set — `checksPassed`, `threadsResolved`,
+`mergeable`, `reviewApproved` — without the terminal states, the CI-failure
+trigger, or the conflict trigger. Use `checksFailed` alone for a "CI broke,
+intervene now" watch, and `conflicted` alone for a stack watch that notifies
+the moment a member branch falls behind its base.
 
 The CI check counts follow the "non-pass" convention: `failed` counts only bad
 conclusions/states (`FAILURE`, `ERROR`, `CANCELLED`, `TIMED_OUT`,

@@ -42,6 +42,7 @@ describe('evaluateConditions', () => {
       checksFailed: false,
       threadsResolved: true,
       mergeable: true,
+      conflicted: false,
       reviewApproved: true,
       merged: false,
       closed: false,
@@ -66,10 +67,16 @@ describe('evaluateConditions', () => {
     expect(evaluateConditions(snapshot({ unresolvedThreads: 2 })).threadsResolved).toBe(false)
   })
 
-  it('mergeable only on MERGEABLE', () => {
+  it('mergeable only on MERGEABLE, conflicted only on CONFLICTING', () => {
     expect(evaluateConditions(snapshot({ mergeable: 'CONFLICTING' })).mergeable).toBe(false)
     expect(evaluateConditions(snapshot({ mergeable: 'UNKNOWN' })).mergeable).toBe(false)
     expect(evaluateConditions(snapshot({ mergeable: null })).mergeable).toBe(false)
+    const red = evaluateConditions(snapshot({ mergeable: 'CONFLICTING' }))
+    expect(red.conflicted).toBe(true)
+    expect(red.mergeable).toBe(false)
+    const clean = evaluateConditions(snapshot({ mergeable: 'MERGEABLE' }))
+    expect(clean.conflicted).toBe(false)
+    expect(clean.mergeable).toBe(true)
   })
 
   it('reviewApproved only on APPROVED', () => {
@@ -115,6 +122,7 @@ describe('diffSnapshots', () => {
       issueComments: 1,
       checks: { passed: 0, failed: 0, pending: 0 },
       newlyFailedChecks: [],
+      mergeable: null,
     })
   })
 
@@ -139,6 +147,18 @@ describe('diffSnapshots', () => {
       snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint', 'test'] }),
     )
     expect(stillRed.newlyFailedChecks).toEqual(['test'])
+  })
+
+  it('flags a mergeable transition with its from/to pair', () => {
+    const diff = diffSnapshots(
+      snapshot({ mergeable: 'MERGEABLE' }),
+      snapshot({ mergeable: 'CONFLICTING' }),
+    )
+    expect(diff.mergeable).toEqual({ from: 'MERGEABLE', to: 'CONFLICTING' })
+    expect(hasChanges(diff)).toBe(true)
+    expect(renderChanges(diff)).toContain('mergeable: MERGEABLE -> CONFLICTING')
+    // UNKNOWN stays a no-op only when it did not change.
+    expect(diffSnapshots(snapshot(), snapshot()).mergeable).toBeNull()
   })
 
   it('flags a moved head ref', () => {
@@ -198,6 +218,7 @@ describe('buildNotificationText', () => {
       issueComments: 0,
       checks: { passed: 0, failed: 0, pending: 0 },
       newlyFailedChecks: [],
+      mergeable: null,
     })
     expect(text).toContain('PR watch "watch-1" changed')
     expect(text).toContain('+1 commit')

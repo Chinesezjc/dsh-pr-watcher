@@ -154,8 +154,10 @@ export function apply(ctx: Context): void {
         description: 'Conditions ANDed for the satisfied notification. Valid values: '
           + CONDITION_ENUM.join(', ')
           + '. Defaults to the ready set: checksPassed, threadsResolved, mergeable, reviewApproved. '
-          + 'Use checksFailed alone to be notified once when CI turns red. '
-          + 'merged+closed and checksPassed+checksFailed are contradictory pairs and are rejected.',
+          + 'Use checksFailed alone to be notified once when CI turns red, and conflicted alone to be '
+          + 'notified the moment a merge-forward against the base becomes necessary. '
+          + 'merged+closed, checksPassed+checksFailed, and mergeable+conflicted are contradictory '
+          + 'pairs and are rejected.',
       },
       notifyChanges: {
         type: 'boolean',
