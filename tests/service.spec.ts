@@ -33,19 +33,23 @@ function fakeAgents(options: {
   liveIds?: string[]
   headers?: Map<string, { origin?: string; parentSession?: string }>
   delivered?: Map<string, string[]>
+  methods?: Map<string, string[]>
 } = {}) {
-  const { liveIds = [], headers = new Map(), delivered = new Map() } = options
-  const record = (id: string) => (message: { content: readonly { type: 'text'; text: string }[] }): void => {
+  const { liveIds = [], headers = new Map(), delivered = new Map(), methods = new Map() } = options
+  const record = (id: string, method: string) => (message: { content: readonly { type: 'text'; text: string }[] }): void => {
     const texts = delivered.get(id) ?? []
     for (const block of message.content) texts.push(block.text)
     delivered.set(id, texts)
+    const called = methods.get(id) ?? []
+    called.push(method)
+    methods.set(id, called)
   }
   const makeAgent = (id: string): Agent => ({
     id,
     session: { id, header: headers.get(id) ?? {} },
-    inject: record(id),
-    followup: record(id),
-    steer: record(id),
+    inject: record(id, 'inject'),
+    followup: record(id, 'followup'),
+    steer: record(id, 'steer'),
   }) as unknown as Agent
   return {
     get(id: string): Agent | undefined {
@@ -71,13 +75,15 @@ async function mounted(config: Record<string, unknown> = {}, agentsOptions: Para
   ctx: Context
   service: TestService
   delivered: Map<string, string[]>
+  methods: Map<string, string[]>
   notifications: WatchNotifyInfo[]
   dispose: () => Promise<void>
 }> {
   const ctx = new Context()
   const delivered = new Map<string, string[]>()
+  const methods = new Map<string, string[]>()
   const notifications: WatchNotifyInfo[] = []
-  ctx.provide('agents', fakeAgents({ ...agentsOptions, delivered }) as never)
+  ctx.provide('agents', fakeAgents({ ...agentsOptions, delivered, methods }) as never)
   const fiber = await ctx.plugin(TestService, { pollIntervalMs: 30000, ...config })
   const service = ctx.prWatcher as unknown as TestService
   ctx.on('pr-watcher/notify', (info) => notifications.push(info))
@@ -85,6 +91,7 @@ async function mounted(config: Record<string, unknown> = {}, agentsOptions: Para
     ctx,
     service,
     delivered,
+    methods,
     notifications,
     dispose: async () => { await fiber.dispose() },
   }
@@ -345,7 +352,7 @@ describe('delivery fences', () => {
   })
 
   it('refuses not-live sessions when resume is off', async () => {
-    const { service, delivered, notifications, dispose } = await mounted()
+    const { service, delivered, notifications, dispose } = await mounted({ allowResume: false })
     service.watch(WATCH)
     service.fetchImpl = async () => snapshot()
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
@@ -354,15 +361,36 @@ describe('delivery fences', () => {
     await dispose()
   })
 
+  it('default delivery wakes a live session via followup', async () => {
+    const { service, delivered, methods, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch(WATCH)
+    service.fetchImpl = async () => snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(methods.get('sess-1')).toEqual(['followup'])
+    await dispose()
+  })
+
+  it('explicit inject delivery seeds context without waking', async () => {
+    const { service, delivered, methods, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, target: { sessionId: 'sess-1', delivery: 'inject' } })
+    service.fetchImpl = async () => snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(methods.get('sess-1')).toEqual(['inject'])
+    await dispose()
+  })
+
   it('delivers to a live session with the configured mode', async () => {
-    const { service, delivered, dispose } = await mounted(
-      { delivery: 'followup' },
+    const { service, delivered, methods, dispose } = await mounted(
+      { delivery: 'steer' },
       { liveIds: ['sess-1'] },
     )
     service.watch(WATCH)
     service.fetchImpl = async () => snapshot()
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(methods.get('sess-1')).toEqual(['steer'])
     await dispose()
   })
 })

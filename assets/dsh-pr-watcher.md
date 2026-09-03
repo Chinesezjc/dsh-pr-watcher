@@ -62,17 +62,21 @@ satisfies the conditions and observes changes sends ONE combined message.
 
 ## Delivery
 
-Notifications reach this session's inbox. The default delivery mode is
-`inject` (seeds context without waking an idle agent); pass `delivery` to
-override:
+Each notification WAKES this session by default: the default delivery mode is
+`followup`, which queues the notification as its own turn after current work
+and wakes an idle-loaded session. Pass `delivery` to override:
 
-- `followup` — queues the notification as its own turn after current work.
-- `steer` — cuts into the nearest step boundary; use for urgent state changes.
-- `inject` — writes the notification into context without waking the agent.
+- `followup` — queues the notification as its own turn and wakes an idle
+  session (default).
+- `steer` — cuts into the nearest step boundary of a running turn; use for
+  urgent state changes.
+- `inject` — only writes the notification into context WITHOUT waking the
+  agent, so it can sit unread; opt in when you want silent seeding.
 
-Waking a persisted (not running) session is OFF by default, so a watch whose
-target session is not live does not deliver. Sessions owned by a subagent are
-refused by design.
+Waking a fully unloaded (persisted, not loaded) session is ON by default
+(`allowResume: true`): the notification resumes the session with the toolset
+its history was produced under. Set `allowResume: false` in the plugin config
+to forbid waking. Sessions owned by a subagent are refused by design.
 
 ## Recommended workflow
 

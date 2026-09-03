@@ -133,10 +133,10 @@ const configSchema: Schemastery = z.object({
   ghPath: z.string().default('gh'),
   /** Per-`gh`-call timeout. */
   ghTimeoutMs: z.natural().min(5000).max(120_000).default(30_000),
-  /** Default delivery mode for notifications. */
-  delivery: deliverySchema.default('inject'),
+  /** Default delivery mode for notifications; `followup` wakes an idle-loaded target. */
+  delivery: deliverySchema.default('followup'),
   /** Whether a notification may wake a persisted (not live) session. */
-  allowResume: z.boolean().default(false),
+  allowResume: z.boolean().default(true),
   /** Default target session for static watches that omit their own sessionId. */
   notifySessionId: z.string().default(''),
   /** Static watches validated at load. */
@@ -168,8 +168,8 @@ export class PrWatcherService extends Service {
     this.pollIntervalMs = config.pollIntervalMs ?? 60000
     this.ghPath = config.ghPath ?? 'gh'
     this.ghTimeoutMs = config.ghTimeoutMs ?? 30000
-    this.delivery = config.delivery ?? 'inject'
-    this.allowResume = config.allowResume ?? false
+    this.delivery = config.delivery ?? 'followup'
+    this.allowResume = config.allowResume ?? true
     const seen = new Set<string>()
     for (const watch of config.watches ?? []) {
       if (watch.id === '') {

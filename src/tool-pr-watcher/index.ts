@@ -128,11 +128,12 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'pr_watch',
     description: 'Register a watch on one GitHub pull request. The service polls the PR on a configurable '
-      + 'interval and delivers one notification to THIS session when the selected conditions are all met '
-      + '(edge-triggered: only on the flip from not-met to met). With notifyChanges, it also notifies on '
-      + 'observed changes (new commits, new reviews, new comments) before the conditions are met. The default '
-      + 'delivery mode is inject (no wake); pass delivery to override. Run pr_watch_list to see active '
-      + 'watches and pr_watch_remove to stop one.',
+      + 'interval and delivers one notification that WAKES this session when the selected conditions are all '
+      + 'met (edge-triggered: only on the flip from not-met to met). With notifyChanges, it also notifies on '
+      + 'observed changes (new commits, new reviews, new comments, check-run or mergeable-state transitions) '
+      + 'before the conditions are met. The default delivery wakes this session (followup); pass delivery '
+      + 'inject to only seed context without waking. Run pr_watch_list to see active watches and '
+      + 'pr_watch_remove to stop one.',
     parameters: {
       repo: {
         type: 'string',
@@ -166,9 +167,9 @@ export function apply(ctx: Context): void {
       delivery: {
         type: 'string',
         enum: ['followup', 'steer', 'inject'],
-        description: 'How the notification reaches this session. `inject` seeds context without waking an '
-          + 'idle agent; `followup` queues its own turn behind current work; `steer` cuts into the nearest '
-          + 'step boundary. Default is the service config (inject unless overridden).',
+        description: 'How the notification wakes this session. `followup` (default) queues a turn behind '
+          + 'current work and wakes an idle-loaded session; `steer` cuts into the nearest step boundary of a '
+          + 'running turn; `inject` only seeds context without waking, so it may sit unread.',
       },
     },
     output: {
@@ -191,7 +192,7 @@ export function apply(ctx: Context): void {
         if (value.ok === false) {
           return [{ type: 'text', text: `pr_watch: not registered: ${value.reason ?? 'unknown error'}` }]
         }
-        const mode = deliveryMode(value.delivery as DeliveryMode | undefined, 'service default (inject)')
+        const mode = deliveryMode(value.delivery as DeliveryMode | undefined, 'followup (default, wakes)')
         const conditions = (value.conditions as string[] | undefined) ?? []
         return [{
           type: 'text',

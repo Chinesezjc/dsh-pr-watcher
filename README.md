@@ -42,12 +42,13 @@ name is baked into this plugin.
   `changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that
   both satisfies the conditions and observes changes sends one combined
   message.
-- Notifications are delivered to the target session's inbox with the standard
-  agent handoff modes (`inject` seeds context without waking an idle agent;
-  `followup` queues its own turn; `steer` cuts into the nearest step
-  boundary). `inject` is the default. Waking a persisted session is off by
-  default (`allowResume: false`); sessions owned by a subagent are refused,
-  matching the host's own handoff fences.
+- Notifications WAKES the target session by default: the default delivery
+  mode is `followup` (queues its own turn; wakes an idle-loaded session).
+  `steer` cuts into the nearest step boundary of a running turn; `inject`
+  seeds context without waking and is opt-in. Waking a fully unloaded
+  (persisted) session is on by default (`allowResume: true`) and resumes it
+  with the toolset its history was produced under. Sessions owned by a
+  subagent are refused, matching the host's own handoff fences.
 
 ### Conditions
 
@@ -100,8 +101,8 @@ The bundle patch mounts the service, the tools, and a companion skill:
       config:
         pollIntervalMs: 60000
         ghPath: gh
-        delivery: inject
-        allowResume: false
+        delivery: followup
+        allowResume: true
         notifySessionId: ""
 
     - id: tool-pr-watcher
@@ -131,7 +132,7 @@ Static watches go in the profile overlay that overrides the bundle patch:
             conditions: [checksPassed, threadsResolved, mergeable, reviewApproved]
             notifyChanges: true
             sessionId: ""
-            delivery: inject
+            delivery: followup
 ```
 
 Every static watch needs a notification target: its own `sessionId`, or the
