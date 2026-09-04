@@ -11,9 +11,11 @@ session when the conditions flip to satisfied, so you do not need to poll
 
 - `pr_status` — one-shot status of a pull request. Pass `repo` (`owner/name`)
   and `number`. Returns the CI check counts (failed/pending/total), unresolved
-  review threads, mergeable state, review decision, head ref, and activity
-  counts. Read-only; registers nothing. Use this when you just want a single
-  snapshot, not a watch.
+  review threads, mergeable state, review decision, head ref, activity counts,
+  and the recent conversation: issue comments, review summaries, and inline
+  review comments with author, time, and body (newest first). Read-only;
+  registers nothing. Use this when you just want a single snapshot, not a
+  watch.
 - `pr_watch` — register a watch on a pull request. Notifications go to THIS
   session. Pass `repo` and `number`; optionally `id` (default
   `owner/name#number`), `conditions`, `notifyChanges`, and `delivery`. The
@@ -54,11 +56,15 @@ moment a merge-forward against the base becomes necessary.
 With `notifyChanges: true`, the watch also delivers a change notification
 whenever a poll observes new commits, new reviews, new review threads, new
 review comments, new issue comments, a **check-run state transition**
-(pending → failed / passed), or a **mergeable-state transition** (e.g.
-`MERGEABLE -> CONFLICTING`). Check deltas are signed and the newly failed
-check names are included, so a CI failure surfaces as
-`changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that both
-satisfies the conditions and observes changes sends ONE combined message.
+(pending → failed / passed), a **mergeable-state transition** (e.g.
+`MERGEABLE -> CONFLICTING`), or a new conversation comment. Check deltas are
+signed and the newly failed check names are included, so a CI failure
+surfaces as `changes: checks: +1 failed, -1 pending, newly failed: lint`.
+Newly arrived comments are embedded with their author, time, and body under a
+`new comments:` block, so a woken agent knows what the reviewer said without
+another query. The comment content is only fetched when a comment count
+changed, so quiet polls cost nothing extra. A poll that both satisfies the
+conditions and observes changes sends ONE combined message.
 
 ## Delivery
 
@@ -143,7 +149,14 @@ watch satisfied; notifications for this watch stop here
 ```
 
 A change-only notification (before satisfaction) says `PR watch "..." changed:`
-and lists the deltas, e.g. `changes: +1 commit, +2 review comments`.
+and lists the deltas, e.g. `changes: +1 commit, +2 review comments`, followed
+by the new comments when any arrived:
+
+```
+new comments:
+[inline src/plugin.ts] reviewer (2026-09-03 02:00:00): this branch looks unreachable / please handle it
+[issue] alice: can we also bump the changelog?
+```
 
 ## Failure behavior
 

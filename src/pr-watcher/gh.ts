@@ -11,9 +11,14 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { CheckSummary, PrSnapshot } from './types.ts'
+import type { CheckSummary, ConversationEntry, PrSnapshot } from './types.ts'
 
 const execFileAsync = promisify(execFile)
+
+/** Maximum comment bodies kept in one snapshot's conversation (newest first). */
+export const CONVERSATION_LIMIT = 15
+/** Per-comment body truncation bound applied when storing a conversation entry. */
+export const CONVERSATION_BODY_LIMIT = 2000
 
 /** One GraphQL round-trip for a PR's full status snapshot. */
 export const PR_QUERY = `
@@ -265,5 +270,140 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
     unresolvedThreads,
     checks,
     failedChecks,
+    // The conversation window is attached by the caller (service) after the
+    // optional REST fetch; a bare mapping starts with an empty window.
+    conversation: [],
   }
+}
+
+/**
+ * Whether the conversation-affecting counts differ between two snapshots.
+ * The conversation content is only fetched over REST when this returns true,
+ * so a watch that sees no comment activity never pays for the extra calls.
+ */
+export function conversationCountsChanged(prev: PrSnapshot, next: PrSnapshot): boolean {
+  return prev.issueComments !== next.issueComments
+    || prev.reviews !== next.reviews
+    || prev.reviewThreads !== next.reviewThreads
+    || prev.reviewComments !== next.reviewComments
+}
+
+/** Raw REST shapes for the conversation endpoints. */
+interface RestComment {
+  id?: number
+  user?: { login?: string | null } | null
+  created_at?: string | null
+  body?: string | null
+  html_url?: string | null
+  path?: string | null
+}
+
+interface RestReview {
+  id?: number
+  user?: { login?: string | null } | null
+  created_at?: string | null
+  body?: string | null
+  html_url?: string | null
+}
+
+/** Run one `gh api` REST request and parse the JSON body. */
+async function ghApiJson(ghPath: string, apiPath: string, timeoutMs: number): Promise<unknown> {
+  const { stdout } = await execFileAsync(ghPath, ['api', apiPath], {
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  return JSON.parse(stdout) as unknown
+}
+
+function truncateBody(body: string | null | undefined): string {
+  if (body === undefined || body === null) return ''
+  return body.length > CONVERSATION_BODY_LIMIT
+    ? `${body.slice(0, CONVERSATION_BODY_LIMIT)}…`
+    : body
+}
+
+function toEntry(kind: ConversationEntry['kind'], id: number | undefined, raw: RestComment): ConversationEntry | null {
+  if (id === undefined) return null
+  return {
+    key: `${kind}-${id}`,
+    kind,
+    author: raw.user?.login ?? 'unknown',
+    createdAt: raw.created_at ?? '',
+    body: truncateBody(raw.body),
+    url: raw.html_url ?? '',
+    ...(raw.path === undefined || raw.path === null ? {} : { path: raw.path }),
+  }
+}
+
+/**
+ * Build the newest-first conversation window from the three REST list
+ * payloads. Review summaries with an empty body (pure inline reviews) are
+ * dropped. The merged window is capped at {@link CONVERSATION_LIMIT}.
+ * @param issueComments - payload of `issues/{n}/comments` (newest first).
+ * @param reviewComments - payload of `pulls/{n}/comments` (newest first).
+ * @param reviews - payload of `pulls/{n}/reviews`.
+ */
+export function conversationFromRest(
+  issueComments: RestComment[],
+  reviewComments: RestComment[],
+  reviews: RestReview[],
+): ConversationEntry[] {
+  const entries: ConversationEntry[] = []
+  for (const raw of issueComments) {
+    const entry = toEntry('issue', raw.id, raw)
+    if (entry !== null) entries.push(entry)
+  }
+  for (const raw of reviewComments) {
+    const entry = toEntry('inline', raw.id, raw)
+    if (entry !== null) entries.push(entry)
+  }
+  for (const raw of reviews) {
+    if (raw.body === undefined || raw.body === null || raw.body === '') continue
+    const entry = toEntry('review', raw.id, raw)
+    if (entry !== null) entries.push(entry)
+  }
+  return entries
+    .filter((entry) => entry.createdAt !== '')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, CONVERSATION_LIMIT)
+}
+
+/**
+ * Fetch the newest conversation comments of one PR over three REST calls:
+ * issue comments, inline review comments, and review summaries. Comment
+ * counts rarely change, so callers gate this on
+ * {@link conversationCountsChanged} to avoid the extra calls on quiet polls.
+ * @param ghPath - path or name of the `gh` executable.
+ * @param repo - repository as `owner/name`.
+ * @param number - pull request number.
+ * @param timeoutMs - per-call timeout.
+ * @returns the newest-first conversation window (empty on any fetch failure is
+ * NOT produced here — failures throw, the caller keeps the previous window).
+ * @throws on non-zero exit or invalid JSON from any of the three calls.
+ */
+export async function fetchConversation(
+  ghPath: string,
+  repo: string,
+  number: number,
+  timeoutMs: number,
+): Promise<ConversationEntry[]> {
+  const { owner, name } = parseRepo(repo)
+  const [issueComments, reviewComments, reviews] = await Promise.all([
+    ghApiJson(
+      ghPath,
+      `repos/${owner}/${name}/issues/${number}/comments?per_page=10&sort=created&direction=desc`,
+      timeoutMs,
+    ) as Promise<RestComment[]>,
+    ghApiJson(
+      ghPath,
+      `repos/${owner}/${name}/pulls/${number}/comments?per_page=10&sort=created&direction=desc`,
+      timeoutMs,
+    ) as Promise<RestComment[]>,
+    ghApiJson(
+      ghPath,
+      `repos/${owner}/${name}/pulls/${number}/reviews?per_page=5`,
+      timeoutMs,
+    ) as Promise<RestReview[]>,
+  ])
+  return conversationFromRest(issueComments, reviewComments, reviews)
 }

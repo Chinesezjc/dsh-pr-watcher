@@ -4,7 +4,7 @@
  * @module dsh-pr-watcher
  */
 
-import type { ChangeSummary, ConditionName, ConditionResult, PrSnapshot } from './types.ts'
+import type { ChangeSummary, ConditionName, ConditionResult, ConversationEntry, PrSnapshot } from './types.ts'
 
 export { hasChanges } from './types.ts'
 
@@ -59,6 +59,7 @@ export function conditionsMet(conditions: readonly ConditionName[], result: Cond
  */
 export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary {
   const prevFailed = new Set(prev.failedChecks)
+  const prevComments = new Set(prev.conversation.map((entry) => entry.key))
   return {
     headRefOid: prev.headRefOid !== next.headRefOid ? next.headRefOid : null,
     headRefName: prev.headRefName !== next.headRefName ? next.headRefName : null,
@@ -76,6 +77,7 @@ export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary
     mergeable: prev.mergeable === next.mergeable
       ? null
       : { from: prev.mergeable, to: next.mergeable },
+    newComments: next.conversation.filter((entry) => !prevComments.has(entry.key)),
   }
 }
 
@@ -146,9 +148,33 @@ export function buildNotificationText(
   if (change !== null) {
     const changesLine = renderChanges(change)
     if (changesLine !== '') lines.push(changesLine)
+    if (change.newComments.length > 0) {
+      lines.push('new comments:')
+      const shown = change.newComments.slice(0, NOTICE_COMMENT_LIMIT)
+      for (const entry of shown) lines.push(renderCommentLine(entry))
+      const hidden = change.newComments.length - shown.length
+      if (hidden > 0) lines.push(`+${hidden} more`)
+    }
   }
   if (satisfiedEdge) {
     lines.push('watch satisfied; notifications for this watch stop here')
   }
   return lines.join('\n')
+}
+
+/** Comment entries rendered inline in one notification. */
+const NOTICE_COMMENT_LIMIT = 6
+/** Per-comment body bound in notification text. */
+const NOTICE_COMMENT_BODY_LIMIT = 500
+
+/** Render one conversation entry as a single notification line. */
+export function renderCommentLine(entry: ConversationEntry): string {
+  const location = entry.kind === 'inline' ? (entry.path ?? '') : ''
+  const tag = entry.kind === 'issue' ? 'issue'
+    : entry.kind === 'review' ? 'review'
+      : location === '' ? 'inline' : `inline ${location}`
+  const body = entry.body.replace(/\n+/g, ' / ')
+  const clipped = body.length > NOTICE_COMMENT_BODY_LIMIT ? `${body.slice(0, NOTICE_COMMENT_BODY_LIMIT)}…` : body
+  const time = entry.createdAt.length > 19 ? entry.createdAt.slice(0, 19).replace('T', ' ') : entry.createdAt
+  return `[${tag}] ${entry.author} (${time}): ${clipped}`
 }

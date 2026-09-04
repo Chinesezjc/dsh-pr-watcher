@@ -36,11 +36,14 @@ name is baked into this plugin.
 - With `notifyChanges: true`, the watch also delivers a change notification
   whenever a poll observes new commits, new reviews, new review threads, new
   review comments, new issue comments, a check-run state transition
-  (pending → failed / passed), or a mergeable-state transition (e.g.
-  `MERGEABLE -> CONFLICTING`). Check deltas are signed and the newly failed
-  check names are included, so a CI failure surfaces as
-  `changes: checks: +1 failed, -1 pending, newly failed: lint`. A poll that
-  both satisfies the conditions and observes changes sends one combined
+  (pending → failed / passed), a mergeable-state transition (e.g.
+  `MERGEABLE -> CONFLICTING`), or a new conversation comment. Check deltas are
+  signed and the newly failed check names are included, so a CI failure
+  surfaces as `changes: checks: +1 failed, -1 pending, newly failed: lint`.
+  Newly arrived comments are embedded with author, time, and body under a
+  `new comments:` block. Comment content is fetched over the REST endpoints
+  only when a comment count changed, so quiet polls cost nothing extra. A poll
+  that both satisfies the conditions and observes changes sends one combined
   message.
 - Notifications WAKES the target session by default: the default delivery
   mode is `followup` (queues its own turn; wakes an idle-loaded session).
@@ -149,8 +152,10 @@ The tools register watches from inside an agent turn; the target session is the
 calling session, so no configuration is needed for the common case.
 
 - `pr_status` — one-shot status of a PR: check counts, unresolved review
-  threads, mergeable state, review decision, head ref, activity counts.
-  Read-only; registers nothing.
+  threads, mergeable state, review decision, head ref, activity counts, and
+  the recent conversation (issue comments, review summaries, inline review
+  comments; newest first with author, time, body). Read-only; registers
+  nothing.
 - `pr_watch` — register a watch on the calling session. Accepts optional
   `id` (default `owner/name#number`), `conditions` (default the ready set),
   `notifyChanges`, and `delivery`. The first poll happens within one poll

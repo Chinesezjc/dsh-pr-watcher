@@ -30,6 +30,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
+    conversation: [],
     ...overrides,
   }
 }
@@ -123,6 +124,7 @@ describe('diffSnapshots', () => {
       checks: { passed: 0, failed: 0, pending: 0 },
       newlyFailedChecks: [],
       mergeable: null,
+      newComments: [],
     })
   })
 
@@ -166,6 +168,17 @@ describe('diffSnapshots', () => {
     const diff = diffSnapshots(base, next)
     expect(diff.headRefOid).toBe('b'.repeat(40))
     expect(diff.headRefName).toBe('feat/y')
+  })
+
+  it('reports comment entries added since the previous snapshot', () => {
+    const first = { key: 'issue-1', kind: 'issue' as const, author: 'alice', createdAt: '2026-09-03T01:00:00Z', body: 'first', url: 'u1' }
+    const second = { key: 'inline-2', kind: 'inline' as const, author: 'bob', createdAt: '2026-09-03T02:00:00Z', body: 'second', url: 'u2', path: 'src/x.ts' }
+    const before = snapshot({ conversation: [first] })
+    const after = snapshot({ conversation: [second, first] })
+    const diff = diffSnapshots(before, after)
+    expect(diff.newComments).toEqual([second])
+    // Same window twice is no change.
+    expect(diffSnapshots(before, before).newComments).toEqual([])
   })
 })
 
@@ -219,6 +232,7 @@ describe('buildNotificationText', () => {
       checks: { passed: 0, failed: 0, pending: 0 },
       newlyFailedChecks: [],
       mergeable: null,
+      newComments: [],
     })
     expect(text).toContain('PR watch "watch-1" changed')
     expect(text).toContain('+1 commit')
@@ -229,5 +243,33 @@ describe('buildNotificationText', () => {
   it('shows state for merged PRs', () => {
     const text = buildNotificationText('watch-1', snapshot({ state: 'MERGED', merged: true }), true, true, null)
     expect(text).toContain('state: MERGED')
+  })
+
+  it('embeds newly arrived comment bodies in the notification', () => {
+    const comment = {
+      key: 'inline-9',
+      kind: 'inline' as const,
+      author: 'bob',
+      createdAt: '2026-09-03T02:00:00Z',
+      body: 'this branch looks unreachable\nplease handle it',
+      url: 'u',
+      path: 'src/x.ts',
+    }
+    const change = {
+      headRefOid: null,
+      headRefName: null,
+      commits: 0,
+      reviews: 0,
+      reviewThreads: 1,
+      reviewComments: 1,
+      issueComments: 0,
+      checks: { passed: 0, failed: 0, pending: 0 },
+      newlyFailedChecks: [],
+      mergeable: null,
+      newComments: [comment],
+    }
+    const text = buildNotificationText('watch-1', snapshot(), false, false, change)
+    expect(text).toContain('new comments:')
+    expect(text).toContain('[inline src/x.ts] bob (2026-09-03 02:00:00): this branch looks unreachable / please handle it')
   })
 })

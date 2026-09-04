@@ -21,12 +21,20 @@ import {
   diffSnapshots,
   evaluateConditions,
 } from './conditions.ts'
-import { ghGraphql, parseRepo, PR_QUERY, snapshotFromGraphql } from './gh.ts'
+import {
+  conversationCountsChanged,
+  fetchConversation,
+  ghGraphql,
+  parseRepo,
+  PR_QUERY,
+  snapshotFromGraphql,
+} from './gh.ts'
 import {
   DEFAULT_CONDITIONS,
   hasChanges,
   isConditionName,
   type ConditionName,
+  type ConversationEntry,
   type DeliveryMode,
   type DeliveryResult,
   type PrSnapshot,
@@ -323,7 +331,19 @@ export class PrWatcherService extends Service {
     }))
   }
 
-  protected async fetchSnapshot(spec: { repo: string; number: number }): Promise<PrSnapshot> {
+  /**
+   * Fetch one PR status snapshot. The GraphQL round-trip carries the counts;
+   * the conversation window is fetched over REST only when no previous
+   * snapshot exists or the conversation counts moved, so quiet polls never
+   * pay for the extra calls. A conversation fetch failure keeps the previous
+   * window (or an empty one) instead of failing the poll.
+   * @param spec - the watched PR.
+   * @param prev - the previous snapshot, when polling an existing watch.
+   */
+  protected async fetchSnapshot(
+    spec: { repo: string; number: number },
+    prev?: PrSnapshot,
+  ): Promise<PrSnapshot> {
     const { owner, name } = parseRepo(spec.repo)
     const data = await ghGraphql(
       this.ghPath,
@@ -331,7 +351,21 @@ export class PrWatcherService extends Service {
       { owner, name, number: String(spec.number) },
       this.ghTimeoutMs,
     )
-    return snapshotFromGraphql(spec.repo, spec.number, data)
+    const base = snapshotFromGraphql(spec.repo, spec.number, data)
+    let conversation: readonly ConversationEntry[]
+    if (prev !== undefined && !conversationCountsChanged(prev, base)) {
+      conversation = prev.conversation
+    } else {
+      try {
+        conversation = await fetchConversation(this.ghPath, spec.repo, spec.number, this.ghTimeoutMs)
+      } catch (error) {
+        this.ctx.logger.warn(
+          `pr-watcher: conversation fetch failed for ${spec.repo}#${spec.number}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        conversation = prev?.conversation ?? []
+      }
+    }
+    return { ...base, conversation }
   }
 
   /** Poll every registered watch once. */
@@ -343,16 +377,16 @@ export class PrWatcherService extends Service {
 
   /** Poll one watch: refresh the snapshot and handle notification edges. */
   private async pollWatch(state: WatchState): Promise<void> {
+    const prev = state.snapshot
     let snapshot: PrSnapshot
     try {
-      snapshot = await this.fetchSnapshot(state.spec)
+      snapshot = await this.fetchSnapshot(state.spec, prev)
     } catch (error) {
       state.lastError = error instanceof Error ? error.message : String(error)
       state.lastPolledAt = new Date().toISOString()
       this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" fetch failed: ${state.lastError}`)
       return
     }
-    const prev = state.snapshot
     state.snapshot = snapshot
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()

@@ -24,6 +24,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
+    conversation: [],
     ...overrides,
   }
 }
@@ -65,7 +66,10 @@ function fakeAgents(options: {
 class TestService extends PrWatcherService {
   fetchImpl: ((spec: { repo: string; number: number }) => Promise<PrSnapshot>) | undefined
 
-  protected override async fetchSnapshot(spec: { repo: string; number: number }): Promise<PrSnapshot> {
+  protected override async fetchSnapshot(
+    spec: { repo: string; number: number },
+    _prev?: PrSnapshot,
+  ): Promise<PrSnapshot> {
     if (this.fetchImpl === undefined) throw new Error('no fetchImpl configured')
     return this.fetchImpl(spec)
   }
@@ -271,6 +275,28 @@ describe('poll transitions', () => {
     expect(text).toContain('checks: +1 failed, -1 pending')
     expect(text).toContain('newly failed: lint')
     expect(text).not.toContain('conditions met')
+    await dispose()
+  })
+
+  it('embeds newly arrived conversation comments in the change notification', async () => {
+    const first = { key: 'issue-1', kind: 'issue' as const, author: 'alice', createdAt: '2026-09-03T01:00:00Z', body: 'baseline', url: 'u1' }
+    const second = { key: 'issue-2', kind: 'issue' as const, author: 'reviewer', createdAt: '2026-09-03T02:00:00Z', body: 'please rename this variable', url: 'u2' }
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'conv', conditions: ['merged'], notifyChanges: true })
+    const seq = [
+      snapshot({ conversation: [first] }),
+      snapshot({ conversation: [second, first] }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    const text = delivered.get('sess-1')![0]!
+    expect(text).toContain('new comments:')
+    expect(text).toContain('reviewer')
+    expect(text).toContain('please rename this variable')
     await dispose()
   })
 

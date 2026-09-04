@@ -90,7 +90,9 @@ export interface CheckSummary {
  * STALE); `checks.pending` counts not-yet-settled runs (QUEUED, IN_PROGRESS,
  * REQUESTED, WAITING, PENDING, EXPECTED, or a null conclusion). A PR with no
  * checks reports 0/0/0/0. `failedChecks` names the failing runs (CheckRun
- * `name` / StatusContext `context`) in rollup order.
+ * `name` / StatusContext `context`) in rollup order. `conversation` holds the
+ * most recent comment content (newest first, capped); it is empty when the
+ * poll skipped the conversation fetch because no comment count changed.
  */
 export interface PrSnapshot {
   readonly repo: string
@@ -110,6 +112,24 @@ export interface PrSnapshot {
   readonly unresolvedThreads: number
   readonly checks: CheckSummary
   readonly failedChecks: readonly string[]
+  readonly conversation: readonly ConversationEntry[]
+}
+
+/**
+ * One comment in the PR conversation. `body` is truncated at a bound; `key`
+ * is the stable identity across polls (`<kind>-<rest-id>`, ids are per-kind).
+ */
+export interface ConversationEntry {
+  readonly key: string
+  /** `issue` (PR-level comment), `review` (review summary), or `inline` (review comment on a diff). */
+  readonly kind: 'issue' | 'review' | 'inline'
+  readonly author: string
+  /** ISO-8601 creation time, used for newest-first ordering. */
+  readonly createdAt: string
+  readonly body: string
+  readonly url: string
+  /** File path for `inline` comments. */
+  readonly path?: string
 }
 
 /** Truth value of every evaluable condition for one snapshot. */
@@ -144,6 +164,8 @@ export interface ChangeSummary {
     readonly from: PrSnapshot['mergeable']
     readonly to: PrSnapshot['mergeable']
   } | null
+  /** Comment entries that arrived since the previous snapshot (newest first, capped). */
+  readonly newComments: readonly ConversationEntry[]
 }
 
 /** Whether a change summary contains any observed change. */
@@ -160,6 +182,7 @@ export function hasChanges(change: ChangeSummary | null): boolean {
     || change.checks.pending !== 0
     || change.newlyFailedChecks.length > 0
     || change.mergeable !== null
+    || change.newComments.length > 0
   )
 }
 

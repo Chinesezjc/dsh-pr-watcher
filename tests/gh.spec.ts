@@ -1,6 +1,13 @@
 /** gh CLI wiring and GraphQL → PrSnapshot mapping. */
 import { describe, expect, it } from 'vitest'
-import { buildGhArgs, parseRepo, PR_QUERY, snapshotFromGraphql } from '../src/pr-watcher/gh.ts'
+import {
+  buildGhArgs,
+  conversationCountsChanged,
+  conversationFromRest,
+  parseRepo,
+  PR_QUERY,
+  snapshotFromGraphql,
+} from '../src/pr-watcher/gh.ts'
 
 function fixture(overrides: Record<string, unknown> = {}): unknown {
   return {
@@ -148,5 +155,53 @@ describe('snapshotFromGraphql', () => {
     expect(snapshot.reviewThreads).toBe(0)
     expect(snapshot.reviewComments).toBe(0)
     expect(snapshot.unresolvedThreads).toBe(0)
+  })
+})
+
+describe('conversationFromRest', () => {
+  it('merges issue, inline, and review-summary comments newest first', () => {
+    const entries = conversationFromRest(
+      [{ id: 1, user: { login: 'alice' }, created_at: '2026-09-03T01:00:00Z', body: 'why?', html_url: 'u1' }],
+      [{ id: 2, user: { login: 'bob' }, created_at: '2026-09-03T03:00:00Z', body: 'inline note', html_url: 'u2', path: 'src/x.ts' }],
+      [
+        { id: 3, user: { login: 'carol' }, created_at: '2026-09-03T02:00:00Z', body: 'summary', html_url: 'u3' },
+        { id: 4, user: { login: 'dave' }, created_at: '2026-09-03T01:30:00Z', body: '', html_url: 'u4' },
+      ],
+    )
+    expect(entries.map((e) => e.key)).toEqual(['inline-2', 'review-3', 'issue-1'])
+    expect(entries[0]).toMatchObject({ kind: 'inline', author: 'bob', path: 'src/x.ts' })
+    expect(entries[1]).toMatchObject({ kind: 'review', author: 'carol' })
+    // Empty review summaries (pure inline reviews) are dropped.
+    expect(entries.some((e) => e.key === 'review-4')).toBe(false)
+  })
+
+  it('caps the window and truncates long bodies', () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      id: i + 1,
+      user: { login: 'u' },
+      created_at: `2026-09-03T00:${String(i).padStart(2, '0')}:00Z`,
+      body: 'x',
+      html_url: 'u',
+    }))
+    const entries = conversationFromRest(many, [], [])
+    expect(entries.length).toBeLessThanOrEqual(15)
+    expect(entries[0]?.createdAt).toBe('2026-09-03T00:19:00Z')
+    const long = conversationFromRest(
+      [{ id: 1, user: { login: 'u' }, created_at: '2026-09-03T01:00:00Z', body: 'y'.repeat(3000), html_url: 'u' }],
+      [],
+      [],
+    )
+    expect(long[0]?.body.length).toBeLessThanOrEqual(2001)
+    expect(long[0]?.body.endsWith('…')).toBe(true)
+  })
+})
+
+describe('conversationCountsChanged', () => {
+  it('is true only when a conversation-affecting count moved', () => {
+    const a = snapshotFromGraphql('example-org/example-repo', 1, fixture())
+    const same = snapshotFromGraphql('example-org/example-repo', 1, fixture())
+    expect(conversationCountsChanged(a, same)).toBe(false)
+    const moreComments = snapshotFromGraphql('example-org/example-repo', 1, fixture({ comments: { totalCount: 2 } }))
+    expect(conversationCountsChanged(a, moreComments)).toBe(true)
   })
 })

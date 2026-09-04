@@ -14,12 +14,15 @@ import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // Activates the `Context.prWatcher` merge declared by the pr-watcher service plugin.
 import type {} from '../pr-watcher/index.ts'
+import { renderCommentLine } from '../pr-watcher/conditions.ts'
 import { CONDITION_NAMES, DEFAULT_CONDITIONS, type DeliveryMode, type PrSnapshot } from '../pr-watcher/types.ts'
 
 /** Services required before the tools can register. */
 export const inject = ['prWatcher', 'tools']
 
 const CONDITION_ENUM = [...CONDITION_NAMES]
+/** Comment entries shown in the pr_status text rendering. */
+const STATUS_CONVERSATION_LIMIT = 8
 
 /** Compact text summary of one snapshot, shared by several renders. */
 function snapshotLines(snapshot: PrSnapshot): string[] {
@@ -32,6 +35,14 @@ function snapshotLines(snapshot: PrSnapshot): string[] {
   if (snapshot.mergeable !== null) lines.push(`mergeable: ${snapshot.mergeable}`)
   if (snapshot.reviewDecision !== null) lines.push(`review decision: ${snapshot.reviewDecision}`)
   lines.push(`head: ${snapshot.headRefName} @ ${snapshot.headRefOid}`)
+  if (snapshot.conversation.length > 0) {
+    lines.push('conversation (newest first):')
+    for (const entry of snapshot.conversation.slice(0, STATUS_CONVERSATION_LIMIT)) {
+      lines.push(renderCommentLine(entry))
+    }
+    const hidden = snapshot.conversation.length - STATUS_CONVERSATION_LIMIT
+    if (hidden > 0) lines.push(`+${hidden} more`)
+  }
   return lines
 }
 
@@ -50,9 +61,10 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'pr_status',
     description: 'Query the current status of one GitHub pull request through the gh CLI: CI check counts '
-      + '(failed/pending/total), unresolved review threads, mergeable state, review decision, head ref, and '
-      + 'activity counts. Read-only; does not register a watch. Use pr_watch to be notified when conditions '
-      + 'are met instead of polling manually.',
+      + '(failed/pending/total), unresolved review threads, mergeable state, review decision, head ref, '
+      + 'activity counts, and the recent conversation (issue comments, review summaries, and inline review '
+      + 'comments with author, time, and body). Read-only; does not register a watch. Use pr_watch to be '
+      + 'notified when conditions are met instead of polling manually.',
     parameters: {
       repo: {
         type: 'string',
@@ -92,6 +104,23 @@ export function apply(ctx: Context): void {
               issueComments: { type: 'number', required: true },
               unresolvedThreads: { type: 'number', required: true },
               failedChecks: { type: 'array', items: { type: 'string' }, required: true },
+              conversation: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    key: { type: 'string', required: true },
+                    kind: { type: 'string', required: true },
+                    author: { type: 'string', required: true },
+                    createdAt: { type: 'string', required: true },
+                    body: { type: 'string', required: true },
+                    url: { type: 'string', required: true },
+                    path: { type: 'string' },
+                  },
+                },
+              },
               checks: {
                 type: 'object',
                 additionalProperties: false,

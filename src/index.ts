@@ -7,8 +7,13 @@
 
 export type * from './pr-watcher/types.ts'
 export {
+  CONVERSATION_BODY_LIMIT,
+  CONVERSATION_LIMIT,
   PR_QUERY,
   buildGhArgs,
+  conversationCountsChanged,
+  conversationFromRest,
+  fetchConversation,
   ghGraphql,
   parseRepo,
   snapshotFromGraphql,
@@ -20,5 +25,6 @@ export {
   evaluateConditions,
   hasChanges,
   renderChanges,
+  renderCommentLine,
 } from './pr-watcher/conditions.ts'
 export { PrWatcherService, default } from './pr-watcher/index.ts'

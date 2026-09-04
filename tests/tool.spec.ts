@@ -26,6 +26,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     unresolvedThreads: 0,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
+    conversation: [],
     ...overrides,
   }
 }
