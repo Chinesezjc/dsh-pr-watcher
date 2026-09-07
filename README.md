@@ -224,10 +224,11 @@ outcome, so other host plugins can react without parsing the message text.
   (identified by stable key) surface.
 - The conversation window keeps the 15 newest comments; if more than 15
   comments arrive between two polls, only the window content is reported.
-- Check contexts and review threads are fetched in windows of 100; snapshots
-  flag truncation and the all-clear conditions fail closed on it (see
-  Conditions), but the raw counts shown in a notification may undercount a
-  window larger than 100.
+- Check contexts and review threads are fetched in windows of 100. When the
+  PR has more, the snapshot flags truncation, the all-clear conditions fail
+  closed on it (see Conditions), and both the notification and `pr_status`
+  carry a `note:` line stating the real total and that only the newest 100
+  were fetched, so the session knows the counts above are partial.
 
 ## Failure behavior
 

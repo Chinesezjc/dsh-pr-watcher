@@ -31,6 +31,12 @@ function snapshotLines(snapshot: PrSnapshot): string[] {
     `checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checks.total}`,
     `review threads: ${snapshot.unresolvedThreads} unresolved of ${snapshot.reviewThreads}`,
   ]
+  if (snapshot.checksTruncated && snapshot.checkContexts > snapshot.checks.total) {
+    lines.push(`note: ${snapshot.checkContexts} check contexts in total; only the newest 100 were fetched, so the check counts above are partial`)
+  }
+  if (snapshot.threadsTruncated) {
+    lines.push(`note: ${snapshot.reviewThreads} review threads in total; only the newest 100 were fetched, so the unresolved count above is partial`)
+  }
   if (snapshot.failedChecks.length > 0) lines.push(`failed checks: ${snapshot.failedChecks.join(', ')}`)
   if (snapshot.mergeable !== null) lines.push(`mergeable: ${snapshot.mergeable}`)
   if (snapshot.reviewDecision !== null) lines.push(`review decision: ${snapshot.reviewDecision}`)
@@ -103,6 +109,9 @@ export function apply(ctx: Context): void {
               reviewComments: { type: 'number', required: true },
               issueComments: { type: 'number', required: true },
               unresolvedThreads: { type: 'number', required: true },
+              checksTruncated: { type: 'boolean', required: true },
+              threadsTruncated: { type: 'boolean', required: true },
+              checkContexts: { type: 'number', required: true },
               failedChecks: { type: 'array', items: { type: 'string' }, required: true },
               conversation: {
                 type: 'array',

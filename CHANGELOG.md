@@ -60,3 +60,11 @@
 - Initial release: host `pr-watcher` service (gh-backed polling, condition
   evaluation, edge-triggered notifications) and the `pr_status` /
   `pr_watch` / `pr_watch_list` / `pr_watch_remove` tools.
+
+## 0.8.0
+
+- Report window truncation to the session: when a PR has more than 100 check
+  contexts or review threads, the notification and `pr_status` carry a
+  `note:` line with the real total ("250 check contexts in total; only the
+  newest 100 were fetched, so the counts above are partial"), and the
+  snapshot exposes the real context total as `checkContexts`.

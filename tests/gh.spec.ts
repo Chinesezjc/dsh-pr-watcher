@@ -223,3 +223,22 @@ describe('truncation flags', () => {
     expect(clean.threadsTruncated).toBe(false)
   })
 })
+
+describe('checkContexts', () => {
+  it('keeps the real total context count and equals checks.total when untruncated', () => {
+    const snap = snapshotFromGraphql('example-org/example-repo', 1, fixture({
+      statusCheckRollup: {
+        state: 'SUCCESS',
+        contexts: {
+          totalCount: 250,
+          nodes: [{ __typename: 'CheckRun', name: 'a', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+        },
+      },
+    }))
+    expect(snap.checkContexts).toBe(250)
+    expect(snap.checksTruncated).toBe(true)
+    const clean = snapshotFromGraphql('example-org/example-repo', 1, fixture())
+    expect(clean.checkContexts).toBe(clean.checks.total)
+    expect(clean.checksTruncated).toBe(false)
+  })
+})

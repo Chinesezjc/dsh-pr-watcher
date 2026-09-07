@@ -30,6 +30,7 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     unresolvedThreads: 0,
     checksTruncated: false,
     threadsTruncated: false,
+    checkContexts: 1,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
     conversation: [],
@@ -287,5 +288,24 @@ describe('truncation fail-closed', () => {
     const result = evaluateConditions(snapshot({ threadsTruncated: true }))
     expect(result.threadsResolved).toBe(false)
     expect(evaluateConditions(snapshot()).threadsResolved).toBe(true)
+  })
+})
+
+describe('truncation reporting', () => {
+  it('states the hidden counts in the notification when windows are truncated', () => {
+    const text = buildNotificationText('watch-1', snapshot({
+      checks: { total: 100, passed: 99, failed: 0, pending: 1 },
+      checkContexts: 250,
+      checksTruncated: true,
+      reviewThreads: 340,
+      threadsTruncated: true,
+    }), false, false, null)
+    expect(text).toContain('250 check contexts in total; only the newest 100 were fetched')
+    expect(text).toContain('340 review threads in total; only the newest 100 were fetched')
+  })
+
+  it('adds no truncation notes for untruncated snapshots', () => {
+    const text = buildNotificationText('watch-1', snapshot(), false, false, null)
+    expect(text).not.toContain('note:')
   })
 })

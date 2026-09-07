@@ -273,9 +273,11 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
     issueComments: numberOr(pullRequest.comments?.totalCount, 0),
     unresolvedThreads,
     // Windows of 100 items: when the PR has more, the counts above may miss
-    // state beyond the window, so the snapshot flags the truncation.
+    // state beyond the window, so the snapshot flags the truncation and keeps
+    // the real total so the notification can state what is hidden.
     checksTruncated: contextTotal > contextNodes.length,
     threadsTruncated: threadTotal > threadNodes.length,
+    checkContexts: contextTotal,
     checks,
     failedChecks,
     // The conversation window is attached by the caller (service) after the

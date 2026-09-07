@@ -122,6 +122,12 @@ export interface PrSnapshot {
    * that require no unresolved threads fail closed on this flag.
    */
   readonly threadsTruncated: boolean
+  /**
+   * Real total check-context count reported by the rollup. Equals
+   * `checks.total` when the window was not truncated; larger when contexts
+   * beyond the 100-item window exist (`checksTruncated` is true).
+   */
+  readonly checkContexts: number
   readonly checks: CheckSummary
   readonly failedChecks: readonly string[]
   readonly conversation: readonly ConversationEntry[]

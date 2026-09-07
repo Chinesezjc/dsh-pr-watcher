@@ -175,9 +175,13 @@ watch.
 - Comment edits and deletions are not detected; only newly added comments
   surface. The conversation window keeps the newest 15 comments.
 - A satisfied watch is fully silent afterwards — one phase, one notification.
-- Check contexts and review threads are fetched in windows of 100; snapshots
-  flag truncation and the all-clear conditions fail closed on a truncated
-  window, so hidden failures or unresolved threads never read as green.
+- Check contexts and review threads are fetched in windows of 100. When a PR
+  has more, the notification and `pr_status` carry a `note:` line with the
+  real total, so you can see the counts above are partial (the all-clear
+  conditions fail closed on a truncated window — hidden failures or
+  unresolved threads never read as green). If the partial view matters, query
+  the exhaustive state yourself (e.g. `gh pr checks` / the REST comments
+  endpoints).
 
 ## Requirements
 
