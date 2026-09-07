@@ -68,3 +68,9 @@
   `note:` line with the real total ("250 check contexts in total; only the
   newest 100 were fetched, so the counts above are partial"), and the
   snapshot exposes the real context total as `checkContexts`.
+
+## 0.8.1
+
+- The checks line's denominator is the real context total (`of N` uses
+  `checkContexts`), matching the review-threads line; the truncation note
+  names how many were actually fetched.

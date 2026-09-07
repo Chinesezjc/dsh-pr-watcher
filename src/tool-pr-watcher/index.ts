@@ -28,11 +28,11 @@ const STATUS_CONVERSATION_LIMIT = 8
 function snapshotLines(snapshot: PrSnapshot): string[] {
   const lines: string[] = [
     `${snapshot.repo}#${snapshot.number} ${snapshot.state}${snapshot.merged ? ' (merged)' : ''}`,
-    `checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checks.total}`,
+    `checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checkContexts}`,
     `review threads: ${snapshot.unresolvedThreads} unresolved of ${snapshot.reviewThreads}`,
   ]
   if (snapshot.checksTruncated && snapshot.checkContexts > snapshot.checks.total) {
-    lines.push(`note: ${snapshot.checkContexts} check contexts in total; only the newest 100 were fetched, so the check counts above are partial`)
+    lines.push(`note: ${snapshot.checkContexts} check contexts in total; only the newest ${snapshot.checks.total} were fetched, so the check counts above are partial`)
   }
   if (snapshot.threadsTruncated) {
     lines.push(`note: ${snapshot.reviewThreads} review threads in total; only the newest 100 were fetched, so the unresolved count above is partial`)

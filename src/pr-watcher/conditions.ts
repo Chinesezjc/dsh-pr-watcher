@@ -145,9 +145,9 @@ export function buildNotificationText(
   }
   const stateLine = snapshot.state === 'MERGED' ? 'state: MERGED' : `state: ${snapshot.state}`
   lines.push(stateLine)
-  lines.push(`checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checks.total}`)
+  lines.push(`checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checkContexts}`)
   if (snapshot.checksTruncated && snapshot.checkContexts > snapshot.checks.total) {
-    lines.push(`note: ${snapshot.checkContexts} check contexts in total; only the newest 100 were fetched, so the check counts above are partial`)
+    lines.push(`note: ${snapshot.checkContexts} check contexts in total; only the newest ${snapshot.checks.total} were fetched, so the check counts above are partial`)
   }
   lines.push(`review threads: ${snapshot.unresolvedThreads} unresolved of ${snapshot.reviewThreads}`)
   if (snapshot.threadsTruncated) {

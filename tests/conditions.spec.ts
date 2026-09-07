@@ -300,6 +300,8 @@ describe('truncation reporting', () => {
       reviewThreads: 340,
       threadsTruncated: true,
     }), false, false, null)
+    // The denominator is the real context total, consistent with the threads line.
+    expect(text).toContain('checks: 0 failed, 1 pending of 250')
     expect(text).toContain('250 check contexts in total; only the newest 100 were fetched')
     expect(text).toContain('340 review threads in total; only the newest 100 were fetched')
   })
