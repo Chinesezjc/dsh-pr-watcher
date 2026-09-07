@@ -205,3 +205,21 @@ describe('conversationCountsChanged', () => {
     expect(conversationCountsChanged(a, moreComments)).toBe(true)
   })
 })
+
+describe('truncation flags', () => {
+  it('flags when the fetched windows are smaller than the real counts', () => {
+    const snapshot = snapshotFromGraphql('example-org/example-repo', 1, fixture({
+      reviewThreads: { totalCount: 150, nodes: [{ isResolved: true, comments: { totalCount: 1 } }] },
+      statusCheckRollup: {
+        state: 'SUCCESS',
+        contexts: { totalCount: 250, nodes: [{ __typename: 'CheckRun', name: 'a', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      },
+    }))
+    expect(snapshot.checksTruncated).toBe(true)
+    expect(snapshot.threadsTruncated).toBe(true)
+    expect(snapshot.checks.total).toBe(1)
+    const clean = snapshotFromGraphql('example-org/example-repo', 1, fixture())
+    expect(clean.checksTruncated).toBe(false)
+    expect(clean.threadsTruncated).toBe(false)
+  })
+})

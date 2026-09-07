@@ -161,10 +161,23 @@ new comments:
 ## Failure behavior
 
 A transient `gh` failure (network, rate limit, GraphQL error) marks the
-watch's `lastError` and keeps the previous snapshot — it does NOT look like a
-change. The next successful poll clears the error. A PR or repository that
-does not exist reports `not found` and keeps the watch in the error state; call
-`pr_status` to re-check, or remove the watch.
+watch's `lastError`, keeps the previous snapshot — it does NOT look like a
+change — and backs off that watch exponentially (30s doubling to a 10min
+ceiling). A PR or repository that does not exist reports `not found` and keeps
+the watch in the error state; call `pr_status` to re-check, or remove the
+watch.
+
+## Operational notes
+
+- Runtime watches are ephemeral unless the plugin config sets `stateFile`:
+  after a process restart they are gone, so re-register with `pr_watch` (or
+  configure a `stateFile` so the plugin restores them itself).
+- Comment edits and deletions are not detected; only newly added comments
+  surface. The conversation window keeps the newest 15 comments.
+- A satisfied watch is fully silent afterwards — one phase, one notification.
+- Check contexts and review threads are fetched in windows of 100; snapshots
+  flag truncation and the all-clear conditions fail closed on a truncated
+  window, so hidden failures or unresolved threads never read as green.
 
 ## Requirements
 

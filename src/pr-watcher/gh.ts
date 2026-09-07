@@ -246,12 +246,16 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
   }
   let unresolvedThreads = 0
   let reviewComments = 0
-  for (const node of pullRequest.reviewThreads?.nodes ?? []) {
+  const threadNodes = pullRequest.reviewThreads?.nodes ?? []
+  for (const node of threadNodes) {
     if (node === null || node === undefined) continue
     if (node.isResolved === false) unresolvedThreads += 1
     reviewComments += numberOr(node.comments?.totalCount, 0)
   }
-  const { checks, failedChecks } = summarizeChecks(pullRequest.statusCheckRollup?.contexts?.nodes ?? [])
+  const contextNodes = pullRequest.statusCheckRollup?.contexts?.nodes ?? []
+  const threadTotal = numberOr(pullRequest.reviewThreads?.totalCount, 0)
+  const contextTotal = numberOr(pullRequest.statusCheckRollup?.contexts?.totalCount, contextNodes.length)
+  const { checks, failedChecks } = summarizeChecks(contextNodes)
   return {
     repo,
     number,
@@ -264,10 +268,14 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
     headRefOid: pullRequest.headRefOid ?? '',
     commits: numberOr(pullRequest.commits?.totalCount, 0),
     reviews: numberOr(pullRequest.reviews?.totalCount, 0),
-    reviewThreads: numberOr(pullRequest.reviewThreads?.totalCount, 0),
+    reviewThreads: threadTotal,
     reviewComments,
     issueComments: numberOr(pullRequest.comments?.totalCount, 0),
     unresolvedThreads,
+    // Windows of 100 items: when the PR has more, the counts above may miss
+    // state beyond the window, so the snapshot flags the truncation.
+    checksTruncated: contextTotal > contextNodes.length,
+    threadsTruncated: threadTotal > threadNodes.length,
     checks,
     failedChecks,
     // The conversation window is attached by the caller (service) after the

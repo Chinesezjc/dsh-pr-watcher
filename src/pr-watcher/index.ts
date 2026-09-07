@@ -16,6 +16,14 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname } from 'node:path'
+import {
   buildNotificationText,
   conditionsMet,
   diffSnapshots,
@@ -87,6 +95,21 @@ interface WatchState {
   notified: boolean
   lastError: string | undefined
   lastPolledAt: string | undefined
+  /** Consecutive fetch failures; drives the exponential backoff window. */
+  failures: number
+  /** Epoch ms before which the next poll of this watch is skipped. */
+  nextAttemptAt: number
+}
+
+/** Version tag of the persisted watch file, bumped on format change. */
+const PERSIST_VERSION = 1
+/** Backoff base for consecutive gh failures (doubles per failure). */
+const BACKOFF_BASE_MS = 30_000
+/** Backoff ceiling. */
+const BACKOFF_MAX_MS = 600_000
+
+function backoffDelay(failures: number): number {
+  return Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (failures - 1))
 }
 
 const deliverySchema = z.union([z.const('followup'), z.const('steer'), z.const('inject')])
@@ -118,6 +141,11 @@ export interface Config {
   readonly notifySessionId: string
   /** Static watches validated at load. */
   readonly watches: readonly ConfigWatch[]
+  /**
+   * File path for persisting runtime watches so they survive process
+   * restarts. Empty disables persistence (runtime watches are ephemeral).
+   */
+  readonly stateFile: string
 }
 
 /** One static watch entry as configured in `Config.watches`. */
@@ -149,6 +177,11 @@ const configSchema: Schemastery = z.object({
   notifySessionId: z.string().default(''),
   /** Static watches validated at load. */
   watches: z.array(configWatchSchema).default([]),
+  /**
+   * File path for persisting runtime watches. Empty (default) keeps runtime
+   * watches in memory only, so they vanish on process restart.
+   */
+  stateFile: z.string().default(''),
 })
 
 /**
@@ -168,6 +201,7 @@ export class PrWatcherService extends Service {
   private readonly delivery: DeliveryMode
   private readonly allowResume: boolean
   private readonly watches = new Map<string, WatchState>()
+  private readonly stateFile: string
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'prWatcher')
@@ -178,6 +212,7 @@ export class PrWatcherService extends Service {
     this.ghTimeoutMs = config.ghTimeoutMs ?? 30000
     this.delivery = config.delivery ?? 'followup'
     this.allowResume = config.allowResume ?? true
+    this.stateFile = config.stateFile ?? ''
     const seen = new Set<string>()
     for (const watch of config.watches ?? []) {
       if (watch.id === '') {
@@ -208,6 +243,9 @@ export class PrWatcherService extends Service {
           ...(watch.delivery === undefined ? {} : { delivery: watch.delivery }),
         },
       }))
+    }
+    if (this.stateFile !== '') {
+      this.loadPersisted(seen)
     }
     // Poll loop: chain the next cycle behind each finished one so cycles never
     // overlap, and drop a tick that fires while a cycle is still running.
@@ -244,6 +282,91 @@ export class PrWatcherService extends Service {
       notified: false,
       lastError: undefined,
       lastPolledAt: undefined,
+      failures: 0,
+      nextAttemptAt: 0,
+    }
+  }
+
+  /** Load persisted runtime watches, validating each like `watch()`. */
+  private loadPersisted(seen: Set<string>): void {
+    if (!existsSync(this.stateFile)) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(readFileSync(this.stateFile, 'utf8')) as { version?: number; watches?: WatchSpec[] }
+    } catch (error) {
+      throw new Error(`pr-watcher: cannot read state file ${this.stateFile}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const record = parsed as { version?: number; watches?: unknown[] }
+    if (record.version !== PERSIST_VERSION || !Array.isArray(record.watches)) {
+      throw new Error(`pr-watcher: state file ${this.stateFile} has unsupported format (expected version ${PERSIST_VERSION})`)
+    }
+    for (const raw of record.watches) {
+      const spec = this.validateSpec(raw)
+      if (seen.has(spec.id)) {
+        throw new Error(`pr-watcher: persisted watch id "${spec.id}" collides with a configured watch`)
+      }
+      seen.add(spec.id)
+      this.watches.set(spec.id, this.initialState(spec))
+    }
+  }
+
+  /** Validate an untrusted watch record (persisted file), throwing with context. */
+  private validateSpec(raw: unknown): WatchSpec {
+    const record = raw as Partial<WatchSpec>
+    const id = typeof record.id === 'string' ? record.id : ''
+    if (id === '') throw new Error('pr-watcher: persisted watch has no id')
+    const repo = typeof record.repo === 'string' ? record.repo : ''
+    const number = typeof record.number === 'number' ? record.number : NaN
+    const targetSessionId = typeof record.target?.sessionId === 'string' ? record.target.sessionId : ''
+    const delivery = typeof record.target?.delivery === 'string' ? record.target.delivery as DeliveryMode : undefined
+    try {
+      parseRepo(repo)
+      if (!Number.isInteger(number) || number < 1) throw new Error(`invalid pull request number ${number}`)
+      if (targetSessionId === '') throw new Error('notification sessionId must not be empty')
+      this.assertConditions(Array.isArray(record.conditions) ? record.conditions : [])
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`pr-watcher: persisted watch "${id}" invalid: ${message}`)
+    }
+    const conditions = (record.conditions as string[]) ?? []
+    this.assertConditions(conditions)
+    return {
+      id,
+      repo,
+      number,
+      conditions,
+      notifyChanges: record.notifyChanges === true,
+      target: {
+        sessionId: targetSessionId,
+        ...(delivery === undefined ? {} : { delivery }),
+      },
+    }
+  }
+
+  /** Persist the current runtime watches (config watches included) atomically. */
+  private persist(): void {
+    if (this.stateFile === '') return
+    const payload = {
+      version: PERSIST_VERSION,
+      watches: [...this.watches.values()].map((state) => ({
+        id: state.spec.id,
+        repo: state.spec.repo,
+        number: state.spec.number,
+        conditions: [...state.spec.conditions],
+        notifyChanges: state.spec.notifyChanges,
+        target: {
+          sessionId: state.spec.target.sessionId,
+          ...(state.spec.target.delivery === undefined ? {} : { delivery: state.spec.target.delivery }),
+        },
+      })),
+    }
+    try {
+      mkdirSync(dirname(this.stateFile), { recursive: true })
+      const tmp = `${this.stateFile}.tmp`
+      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+      renameSync(tmp, this.stateFile)
+    } catch (error) {
+      this.ctx.logger.warn(`pr-watcher: cannot persist watches to ${this.stateFile}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -287,22 +410,30 @@ export class PrWatcherService extends Service {
   watch(spec: WatchSpec): WatchResult {
     if (spec.id === '') return { ok: false, reason: 'watch id must not be empty' }
     if (this.watches.has(spec.id)) return { ok: false, reason: `watch "${spec.id}" already registered` }
-    if (spec.target.sessionId === '') return { ok: false, reason: 'notification sessionId must not be empty' }
+    const failure = this.specFailure(spec)
+    if (failure !== undefined) return { ok: false, reason: failure }
+    this.watches.set(spec.id, this.initialState(spec))
+    this.persist()
+    return { ok: true, id: spec.id }
+  }
+
+  /** Validate one watch spec, returning a failure reason or undefined. */
+  private specFailure(spec: WatchSpec): string | undefined {
+    if (spec.target.sessionId === '') return 'notification sessionId must not be empty'
     if (!Number.isInteger(spec.number) || spec.number < 1) {
-      return { ok: false, reason: `invalid pull request number ${spec.number}` }
+      return `invalid pull request number ${spec.number}`
     }
     try {
       parseRepo(spec.repo)
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      return error instanceof Error ? error.message : String(error)
     }
     try {
       this.assertConditions(spec.conditions)
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      return error instanceof Error ? error.message : String(error)
     }
-    this.watches.set(spec.id, this.initialState(spec))
-    return { ok: true, id: spec.id }
+    return undefined
   }
 
   /**
@@ -311,7 +442,9 @@ export class PrWatcherService extends Service {
    * @returns whether a watch with that id existed and was removed.
    */
   unwatch(id: string): boolean {
-    return this.watches.delete(id)
+    const removed = this.watches.delete(id)
+    if (removed) this.persist()
+    return removed
   }
 
   /** Live view of every registered watch. */
@@ -344,20 +477,13 @@ export class PrWatcherService extends Service {
     spec: { repo: string; number: number },
     prev?: PrSnapshot,
   ): Promise<PrSnapshot> {
-    const { owner, name } = parseRepo(spec.repo)
-    const data = await ghGraphql(
-      this.ghPath,
-      PR_QUERY,
-      { owner, name, number: String(spec.number) },
-      this.ghTimeoutMs,
-    )
-    const base = snapshotFromGraphql(spec.repo, spec.number, data)
+    const base = await this.fetchBase(spec)
     let conversation: readonly ConversationEntry[]
     if (prev !== undefined && !conversationCountsChanged(prev, base)) {
       conversation = prev.conversation
     } else {
       try {
-        conversation = await fetchConversation(this.ghPath, spec.repo, spec.number, this.ghTimeoutMs)
+        conversation = await this.fetchConversationWindow(spec)
       } catch (error) {
         this.ctx.logger.warn(
           `pr-watcher: conversation fetch failed for ${spec.repo}#${spec.number}: ${error instanceof Error ? error.message : String(error)}`,
@@ -366,6 +492,23 @@ export class PrWatcherService extends Service {
       }
     }
     return { ...base, conversation }
+  }
+
+  /** GraphQL half of a snapshot: counts plus state, without conversation content. */
+  protected async fetchBase(spec: { repo: string; number: number }): Promise<PrSnapshot> {
+    const { owner, name } = parseRepo(spec.repo)
+    const data = await ghGraphql(
+      this.ghPath,
+      PR_QUERY,
+      { owner, name, number: String(spec.number) },
+      this.ghTimeoutMs,
+    )
+    return snapshotFromGraphql(spec.repo, spec.number, data)
+  }
+
+  /** REST half of a snapshot: the newest conversation window. */
+  protected async fetchConversationWindow(spec: { repo: string; number: number }): Promise<ConversationEntry[]> {
+    return fetchConversation(this.ghPath, spec.repo, spec.number, this.ghTimeoutMs)
   }
 
   /** Poll every registered watch once. */
@@ -377,16 +520,22 @@ export class PrWatcherService extends Service {
 
   /** Poll one watch: refresh the snapshot and handle notification edges. */
   private async pollWatch(state: WatchState): Promise<void> {
+    if (Date.now() < state.nextAttemptAt) return
     const prev = state.snapshot
     let snapshot: PrSnapshot
     try {
       snapshot = await this.fetchSnapshot(state.spec, prev)
     } catch (error) {
+      state.failures += 1
+      state.nextAttemptAt = Date.now() + backoffDelay(state.failures)
       state.lastError = error instanceof Error ? error.message : String(error)
       state.lastPolledAt = new Date().toISOString()
-      this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" fetch failed: ${state.lastError}`)
+      this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" fetch failed: ${state.lastError}`
+        + ` (backing off ${backoffDelay(state.failures) / 1000}s)`)
       return
     }
+    state.failures = 0
+    state.nextAttemptAt = 0
     state.snapshot = snapshot
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()
@@ -400,7 +549,10 @@ export class PrWatcherService extends Service {
     const change = prev === undefined ? null : diffSnapshots(prev, snapshot)
     const changed = hasChanges(change)
 
-    if (!satisfiedEdge && !(state.spec.notifyChanges && changed)) return
+    // A satisfied watch is done: after the single edge notification it stays
+    // silent even when later changes arrive; a change-only watch (never
+    // satisfied) keeps notifying as long as notifyChanges is on.
+    if (!satisfiedEdge && !(state.spec.notifyChanges && changed && !state.notified)) return
     const text = buildNotificationText(state.spec.id, snapshot, satisfied, satisfiedEdge, change)
     const delivered = await this.deliver(state.spec.target, text)
     if (!delivered.delivered) {

@@ -14,11 +14,15 @@ export { hasChanges } from './types.ts'
  * - `checksPassed` — no failed and no pending checks (`non-pass=0`, fully
  *   settled). A PR with no checks at all reports 0/0/0/0 and satisfies
  *   vacuously; the notification text shows the counts so the receiver can see
- *   that the PR carries no checks.
+ *   that the PR carries no checks. Fails closed when the check context window
+ *   was truncated (more than 100 contexts), because hidden failures would
+ *   otherwise read as green.
  * - `checksFailed` — at least one check failed. Mutually exclusive with
  *   `checksPassed` (a watch selecting both never satisfies and is rejected at
  *   load). Use for a "CI broke, intervene now" trigger.
- * - `threadsResolved` — no unresolved review threads.
+ * - `threadsResolved` — no unresolved review threads. Fails closed when the
+ *   thread window was truncated (more than 100 threads), because unresolved
+ *   threads beyond the window would otherwise read as resolved.
  * - `mergeable` — GitHub reports `MERGEABLE`. Mutually exclusive with
  *   `conflicted` (a watch selecting both never satisfies and is rejected at
  *   load).
@@ -31,9 +35,9 @@ export { hasChanges } from './types.ts'
  */
 export function evaluateConditions(snapshot: PrSnapshot): ConditionResult {
   return {
-    checksPassed: snapshot.checks.failed === 0 && snapshot.checks.pending === 0,
+    checksPassed: snapshot.checks.failed === 0 && snapshot.checks.pending === 0 && !snapshot.checksTruncated,
     checksFailed: snapshot.checks.failed > 0,
-    threadsResolved: snapshot.unresolvedThreads === 0,
+    threadsResolved: snapshot.unresolvedThreads === 0 && !snapshot.threadsTruncated,
     mergeable: snapshot.mergeable === 'MERGEABLE',
     conflicted: snapshot.mergeable === 'CONFLICTING',
     reviewApproved: snapshot.reviewDecision === 'APPROVED',

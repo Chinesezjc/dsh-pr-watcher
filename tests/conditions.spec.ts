@@ -28,6 +28,8 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     reviewComments: 0,
     issueComments: 0,
     unresolvedThreads: 0,
+    checksTruncated: false,
+    threadsTruncated: false,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
     conversation: [],
@@ -271,5 +273,19 @@ describe('buildNotificationText', () => {
     const text = buildNotificationText('watch-1', snapshot(), false, false, change)
     expect(text).toContain('new comments:')
     expect(text).toContain('[inline src/x.ts] bob (2026-09-03 02:00:00): this branch looks unreachable / please handle it')
+  })
+})
+
+describe('truncation fail-closed', () => {
+  it('checksPassed fails closed when the context window was truncated', () => {
+    const result = evaluateConditions(snapshot({ checksTruncated: true }))
+    expect(result.checksPassed).toBe(false)
+    expect(evaluateConditions(snapshot()).checksPassed).toBe(true)
+  })
+
+  it('threadsResolved fails closed when the thread window was truncated', () => {
+    const result = evaluateConditions(snapshot({ threadsTruncated: true }))
+    expect(result.threadsResolved).toBe(false)
+    expect(evaluateConditions(snapshot()).threadsResolved).toBe(true)
   })
 })

@@ -78,7 +78,10 @@ The CI check counts follow the "non-pass" convention: `failed` counts only bad
 conclusions/states (`FAILURE`, `ERROR`, `CANCELLED`, `TIMED_OUT`,
 `ACTION_REQUIRED`, `STARTUP_FAILURE`, `STALE`), `pending` counts not-yet-settled
 runs. The notification text shows the raw counts so the receiver can see a
-vacuous zero-check result.
+vacuous zero-check result. Snapshots flag when the 100-item check-context or
+review-thread window was smaller than the PR's real count, and
+`checksPassed`/`threadsResolved` fail closed on a truncated window — hidden
+failures or unresolved threads never read as green.
 
 ## Requirements
 
@@ -144,12 +147,27 @@ watch ids, malformed `owner/name` references, unknown condition names, and the
 `merged`+`closed` pair also fail at load.
 
 The `gh` binary path and per-call timeout are configurable (`ghPath`,
-`ghTimeoutMs`). The minimum poll interval is 30s.
+`ghTimeoutMs`). The minimum poll interval is 30s. Set `stateFile` to a file
+path to persist the runtime watch set across process restarts:
+
+```yaml
+- id: pr-watcher
+  name: dsh-pr-watcher/pr-watcher
+  config:
+    stateFile: /path/to/pr-watcher-state.json
+```
+
+Without `stateFile`, runtime watches live in memory and vanish when the
+process restarts (static config watches always survive). Consecutive gh
+failures back off per watch (30s doubling to a 10min ceiling), so a failing or
+rate-limited endpoint is not hammered every poll cycle.
 
 ### Runtime watches
 
 The tools register watches from inside an agent turn; the target session is the
-calling session, so no configuration is needed for the common case.
+calling session, so no configuration is needed for the common case. With
+`stateFile` configured, registrations and removals are persisted atomically on
+every change and restored on the next activation.
 
 - `pr_status` — one-shot status of a PR: check counts, unresolved review
   threads, mergeable state, review decision, head ref, activity counts, and
@@ -198,13 +216,27 @@ Each delivery also emits a `pr-watcher/notify` Cordis event with the watch id,
 whether it was the satisfied transition, the change summary, and the delivery
 outcome, so other host plugins can react without parsing the message text.
 
+## Known limits
+
+- A satisfied watch delivers nothing further (the single edge notification is
+  the whole job); to track a later phase, register a second watch.
+- Comment edits and deletions are not detected — only newly added comments
+  (identified by stable key) surface.
+- The conversation window keeps the 15 newest comments; if more than 15
+  comments arrive between two polls, only the window content is reported.
+- Check contexts and review threads are fetched in windows of 100; snapshots
+  flag truncation and the all-clear conditions fail closed on it (see
+  Conditions), but the raw counts shown in a notification may undercount a
+  window larger than 100.
+
 ## Failure behavior
 
 A `gh` call that fails (non-zero exit, GraphQL error, invalid JSON) marks the
-watch's `lastError` and keeps the previous snapshot, so a transient outage
-never looks like a change. The next successful poll clears the error. A PR or
-repository that does not exist reports `not found` and keeps the watch in the
-error state.
+watch's `lastError`, keeps the previous snapshot (so a transient outage never
+looks like a change), and starts an exponential backoff for that watch (30s
+doubling to a 10min ceiling). A conversation-fetch failure keeps the previous
+conversation window without failing the poll. A PR or repository that does not
+exist reports `not found` and keeps the watch in the error state.
 
 ## Development
 

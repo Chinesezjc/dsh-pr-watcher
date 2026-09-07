@@ -24,6 +24,8 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     reviewComments: 0,
     issueComments: 0,
     unresolvedThreads: 0,
+    checksTruncated: false,
+    threadsTruncated: false,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
     conversation: [],

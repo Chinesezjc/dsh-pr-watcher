@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import PrWatcherService from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
+import type { ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
   return {
@@ -22,6 +25,8 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     reviewComments: 0,
     issueComments: 0,
     unresolvedThreads: 0,
+    checksTruncated: false,
+    threadsTruncated: false,
     checks: { total: 1, passed: 1, failed: 0, pending: 0 },
     failedChecks: [],
     conversation: [],
@@ -64,14 +69,21 @@ function fakeAgents(options: {
 }
 
 class TestService extends PrWatcherService {
+  /** Feeds the GraphQL half of fetchSnapshot (the real gate runs on top). */
   fetchImpl: ((spec: { repo: string; number: number }) => Promise<PrSnapshot>) | undefined
+  /** Feeds the REST conversation half; defaults to an empty window. */
+  convImpl: ((spec: { repo: string; number: number }) => Promise<ConversationEntry[]>) | undefined
+  convCalls = 0
 
-  protected override async fetchSnapshot(
-    spec: { repo: string; number: number },
-    _prev?: PrSnapshot,
-  ): Promise<PrSnapshot> {
+  protected override async fetchBase(spec: { repo: string; number: number }): Promise<PrSnapshot> {
     if (this.fetchImpl === undefined) throw new Error('no fetchImpl configured')
     return this.fetchImpl(spec)
+  }
+
+  protected override async fetchConversationWindow(spec: { repo: string; number: number }): Promise<ConversationEntry[]> {
+    this.convCalls += 1
+    if (this.convImpl === undefined) return []
+    return this.convImpl(spec)
   }
 }
 
@@ -283,13 +295,18 @@ describe('poll transitions', () => {
     const second = { key: 'issue-2', kind: 'issue' as const, author: 'reviewer', createdAt: '2026-09-03T02:00:00Z', body: 'please rename this variable', url: 'u2' }
     const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
     service.watch({ ...WATCH, id: 'conv', conditions: ['merged'], notifyChanges: true })
+    // The base snapshots move the issue-comment count so the real fetch gate
+    // fetches the conversation window through the seam.
     const seq = [
-      snapshot({ conversation: [first] }),
-      snapshot({ conversation: [second, first] }),
+      snapshot({ issueComments: 1 }),
+      snapshot({ issueComments: 2 }),
     ]
+    const windows: ConversationEntry[][] = [[first], [second, first]]
     let i = 0
-    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    service.fetchImpl = async () => seq[i] ?? snapshot()
+    service.convImpl = async () => windows[Math.min(i, windows.length - 1)] ?? []
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    i = 1
     expect(delivered.get('sess-1')).toBeUndefined()
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)
@@ -346,7 +363,7 @@ describe('poll transitions', () => {
     await dispose()
   })
 
-  it('keeps polling and reports fetch failures without delivering', async () => {
+  it('backs off after a failure and recovers once the backoff window is reset', async () => {
     const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
     service.watch(WATCH)
     let calls = 0
@@ -358,6 +375,12 @@ describe('poll transitions', () => {
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(service.list()[0]!.lastError).toContain('gh unavailable')
     expect(delivered.get('sess-1')).toBeUndefined()
+    // The immediate second cycle is inside the backoff window: no new fetch.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    // Re-registering resets the backoff state; the next poll succeeds.
+    service.unwatch('w1')
+    service.watch(WATCH)
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(service.list()[0]!.lastError).toBeUndefined()
     expect(delivered.get('sess-1')).toHaveLength(1)
@@ -431,6 +454,121 @@ describe('one-shot check', () => {
     service.fetchImpl = async () => { throw new Error('boom') }
     const bad = await service.check('example-org/example-repo', 1)
     expect(bad).toEqual({ ok: false, reason: 'boom' })
+    await dispose()
+  })
+})
+
+describe('conversation gate in the real fetchSnapshot', () => {
+  const ENTRY: ConversationEntry = { key: 'issue-1', kind: 'issue', author: 'a', createdAt: '2026-09-03T01:00:00Z', body: 'x', url: 'u' }
+
+  it('retains the previous window without calling the REST seam when counts are unchanged', async () => {
+    const { service, dispose } = await mounted()
+    const base = snapshot({ issueComments: 5 })
+    service.fetchImpl = async () => base
+    const prev = { ...base, conversation: [ENTRY] }
+    const result = await (service as unknown as { fetchSnapshot(spec: { repo: string; number: number }, prev?: PrSnapshot): Promise<PrSnapshot> }).fetchSnapshot({ repo: 'example-org/example-repo', number: 1 }, prev)
+    expect(result.conversation).toEqual([ENTRY])
+    expect(service.convCalls).toBe(0)
+    await dispose()
+  })
+
+  it('fetches the window through the seam when a comment count moved', async () => {
+    const { service, dispose } = await mounted()
+    const newer: ConversationEntry = { ...ENTRY, key: 'issue-2', body: 'y' }
+    service.fetchImpl = async () => snapshot({ issueComments: 6 })
+    service.convImpl = async () => [newer, ENTRY]
+    const prev = { ...snapshot({ issueComments: 5 }), conversation: [ENTRY] }
+    const result = await (service as unknown as { fetchSnapshot(spec: { repo: string; number: number }, prev?: PrSnapshot): Promise<PrSnapshot> }).fetchSnapshot({ repo: 'example-org/example-repo', number: 1 }, prev)
+    expect(result.conversation).toEqual([newer, ENTRY])
+    expect(service.convCalls).toBe(1)
+    await dispose()
+  })
+
+  it('keeps the previous window when the conversation fetch fails', async () => {
+    const { service, dispose } = await mounted()
+    service.fetchImpl = async () => snapshot({ issueComments: 6 })
+    service.convImpl = async () => { throw new Error('rate limited') }
+    const prev = { ...snapshot({ issueComments: 5 }), conversation: [ENTRY] }
+    const result = await (service as unknown as { fetchSnapshot(spec: { repo: string; number: number }, prev?: PrSnapshot): Promise<PrSnapshot> }).fetchSnapshot({ repo: 'example-org/example-repo', number: 1 }, prev)
+    expect(result.conversation).toEqual([ENTRY])
+    await dispose()
+  })
+})
+
+describe('watch persistence', () => {
+  function tempStateFile(): { dir: string; file: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'prw-state-'))
+    return { dir, file: join(dir, 'state.json') }
+  }
+
+  it('survives a service restart through the state file', async () => {
+    const { dir, file } = tempStateFile()
+    try {
+      const first = await mounted({ stateFile: file })
+      expect(first.service.watch(WATCH).ok).toBe(true)
+      await first.dispose()
+      expect(existsSync(file)).toBe(true)
+      expect(JSON.parse(readFileSync(file, 'utf8')).watches).toHaveLength(1)
+
+      const second = await mounted({ stateFile: file })
+      expect(second.service.list().map((w) => w.id)).toEqual(['w1'])
+      expect(second.service.unwatch('w1')).toBe(true)
+      await second.dispose()
+      expect(JSON.parse(readFileSync(file, 'utf8')).watches).toHaveLength(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails the load loudly on a corrupt or version-mismatched state file', async () => {
+    const { dir, file } = tempStateFile()
+    try {
+      const ctx = new Context()
+      ctx.provide('agents', fakeAgents() as never)
+      writeFileSync(file, 'not json')
+      await expectPluginThrows(ctx, { stateFile: file }, /cannot read state file/)
+      writeFileSync(file, JSON.stringify({ version: 99, watches: [] }))
+      await expectPluginThrows(ctx, { stateFile: file }, /unsupported format/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('backoff and satisfied-silence', () => {
+  it('skips further fetches inside the backoff window after a failure', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch(WATCH)
+    let calls = 0
+    service.fetchImpl = async () => {
+      calls += 1
+      throw new Error('gh unavailable')
+    }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    expect(service.list()[0]!.lastError).toContain('gh unavailable')
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    await dispose()
+  })
+
+  it('stays silent after the satisfied notification even when later changes arrive', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'once', notifyChanges: true })
+    const seq = [
+      snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
+      snapshot(),
+      snapshot({ commits: 2 }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(delivered.get('sess-1')![0]).toContain('conditions met')
+    // The +1 commit after satisfaction must NOT produce a second notification.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
     await dispose()
   })
 })

@@ -110,6 +110,18 @@ export interface PrSnapshot {
   readonly reviewComments: number
   readonly issueComments: number
   readonly unresolvedThreads: number
+  /**
+   * True when the rollup context fetch window (100) was smaller than the PR's
+   * actual context count, so the check counts may miss failures. Conditions
+   * that require all-clear fail closed on this flag.
+   */
+  readonly checksTruncated: boolean
+  /**
+   * True when the review-thread fetch window (100) was smaller than the PR's
+   * actual thread count, so `unresolvedThreads` may undercount. Conditions
+   * that require no unresolved threads fail closed on this flag.
+   */
+  readonly threadsTruncated: boolean
   readonly checks: CheckSummary
   readonly failedChecks: readonly string[]
   readonly conversation: readonly ConversationEntry[]
