@@ -45,13 +45,14 @@ name is baked into this plugin.
   only when a comment count changed, so quiet polls cost nothing extra. A poll
   that both satisfies the conditions and observes changes sends one combined
   message.
-- Notifications WAKES the target session by default: the default delivery
-  mode is `followup` (queues its own turn; wakes an idle-loaded session).
-  `steer` cuts into the nearest step boundary of a running turn; `inject`
-  seeds context without waking and is opt-in. Waking a fully unloaded
-  (persisted) session is on by default (`allowResume: true`) and resumes it
-  with the toolset its history was produced under. Sessions owned by a
-  subagent are refused, matching the host's own handoff fences.
+- Notifications CUT INTO the target session by default: the default delivery
+  mode is `steer` (interrupts at the nearest step boundary of a running turn;
+  wakes an idle-loaded session). `followup` queues the notification as its own
+  turn behind current work; `inject` seeds context without waking and is
+  opt-in. Waking a fully unloaded (persisted) session is on by default
+  (`allowResume: true`) and resumes it with the toolset its history was
+  produced under. Sessions owned by a subagent are refused, matching the
+  host's own handoff fences.
 
 ### Conditions
 
@@ -107,7 +108,7 @@ The bundle patch mounts the service, the tools, and a companion skill:
       config:
         pollIntervalMs: 60000
         ghPath: gh
-        delivery: followup
+        delivery: steer
         allowResume: true
         notifySessionId: ""
 
@@ -138,7 +139,7 @@ Static watches go in the profile overlay that overrides the bundle patch:
             conditions: [checksPassed, threadsResolved, mergeable, reviewApproved]
             notifyChanges: true
             sessionId: ""
-            delivery: followup
+            delivery: steer
 ```
 
 Every static watch needs a notification target: its own `sessionId`, or the

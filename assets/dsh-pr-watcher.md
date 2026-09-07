@@ -68,14 +68,15 @@ conditions and observes changes sends ONE combined message.
 
 ## Delivery
 
-Each notification WAKES this session by default: the default delivery mode is
-`followup`, which queues the notification as its own turn after current work
-and wakes an idle-loaded session. Pass `delivery` to override:
+Each notification CUTS INTO this session by default: the default delivery mode
+is `steer`, which interrupts at the nearest step boundary of a running turn
+(and wakes an idle-loaded session), so a satisfied or changed watch reaches
+you immediately even mid-task. Pass `delivery` to override:
 
-- `followup` — queues the notification as its own turn and wakes an idle
-  session (default).
-- `steer` — cuts into the nearest step boundary of a running turn; use for
-  urgent state changes.
+- `steer` — cuts into the nearest step boundary of a running turn; wakes an
+  idle session (default).
+- `followup` — queues the notification as its own turn after current work;
+  wakes an idle session.
 - `inject` — only writes the notification into context WITHOUT waking the
   agent, so it can sit unread; opt in when you want silent seeding.
 

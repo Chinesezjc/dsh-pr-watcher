@@ -2,17 +2,18 @@
 # model-facing tools, and the companion skill. Watches are configured per
 # deployment in the profile overlay (Config.watches) or registered at runtime
 # through pr_watch; no watch or repository name is baked into the bundle.
-# delivery: followup wakes an idle-loaded target session with each
-# notification; allowResume lets a fully unloaded (persisted) session be
-# woken too. Both are opt-out: pass inject for silent context seeding and
-# set allowResume: false to forbid waking.
+# delivery: steer cuts the notification into the nearest step boundary of the
+# target session (an idle session is woken into a turn); allowResume lets a
+# fully unloaded (persisted) session be woken too. Both are opt-out: pass
+# followup to queue behind current work and inject for silent context
+# seeding, and set allowResume: false to forbid waking.
 - insert:
     - id: pr-watcher
       name: dsh-pr-watcher/pr-watcher
       config:
         pollIntervalMs: 60000
         ghPath: gh
-        delivery: followup
+        delivery: steer
         allowResume: true
         notifySessionId: ""
 

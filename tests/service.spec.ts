@@ -411,9 +411,19 @@ describe('delivery fences', () => {
     await dispose()
   })
 
-  it('default delivery wakes a live session via followup', async () => {
+  it('default delivery cuts into a live session via steer', async () => {
     const { service, delivered, methods, dispose } = await mounted({}, { liveIds: ['sess-1'] })
     service.watch(WATCH)
+    service.fetchImpl = async () => snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(methods.get('sess-1')).toEqual(['steer'])
+    await dispose()
+  })
+
+  it('explicit followup delivery queues a turn', async () => {
+    const { service, delivered, methods, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'followup-watch', target: { sessionId: 'sess-1', delivery: 'followup' } })
     service.fetchImpl = async () => snapshot()
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)

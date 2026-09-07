@@ -169,9 +169,9 @@ export function apply(ctx: Context): void {
       + 'interval and delivers one notification that WAKES this session when the selected conditions are all '
       + 'met (edge-triggered: only on the flip from not-met to met). With notifyChanges, it also notifies on '
       + 'observed changes (new commits, new reviews, new comments, check-run or mergeable-state transitions) '
-      + 'before the conditions are met. The default delivery wakes this session (followup); pass delivery '
-      + 'inject to only seed context without waking. Run pr_watch_list to see active watches and '
-      + 'pr_watch_remove to stop one.',
+      + 'before the conditions are met. The default delivery cuts into this session (steer); pass delivery '
+      + 'followup to queue behind current work, or inject to only seed context without waking. Run '
+      + 'pr_watch_list to see active watches and pr_watch_remove to stop one.',
     parameters: {
       repo: {
         type: 'string',
@@ -205,9 +205,10 @@ export function apply(ctx: Context): void {
       delivery: {
         type: 'string',
         enum: ['followup', 'steer', 'inject'],
-        description: 'How the notification wakes this session. `followup` (default) queues a turn behind '
-          + 'current work and wakes an idle-loaded session; `steer` cuts into the nearest step boundary of a '
-          + 'running turn; `inject` only seeds context without waking, so it may sit unread.',
+        description: 'How the notification reaches this session. `steer` (default) cuts into the nearest '
+          + 'step boundary of a running turn, so the notification interrupts current work; `followup` queues '
+          + 'a turn behind current work (both wake an idle-loaded session); `inject` only seeds context '
+          + 'without waking, so it may sit unread.',
       },
     },
     output: {
@@ -230,7 +231,7 @@ export function apply(ctx: Context): void {
         if (value.ok === false) {
           return [{ type: 'text', text: `pr_watch: not registered: ${value.reason ?? 'unknown error'}` }]
         }
-        const mode = deliveryMode(value.delivery as DeliveryMode | undefined, 'followup (default, wakes)')
+        const mode = deliveryMode(value.delivery as DeliveryMode | undefined, 'steer (default, cuts in)')
         const conditions = (value.conditions as string[] | undefined) ?? []
         return [{
           type: 'text',

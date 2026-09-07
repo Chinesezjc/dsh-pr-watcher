@@ -74,3 +74,10 @@
 - The checks line's denominator is the real context total (`of N` uses
   `checkContexts`), matching the review-threads line; the truncation note
   names how many were actually fetched.
+
+## 0.9.0
+
+- Default delivery mode is now `steer`: a notification cuts into the nearest
+  step boundary of a running turn (and wakes an idle-loaded session) instead
+  of queueing behind current work. `followup` (queue its own turn) and
+  `inject` (silent seeding) remain available per watch / per config.
