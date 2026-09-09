@@ -33,7 +33,7 @@ name is baked into this plugin.
 - A watch is **satisfied** when all its selected conditions hold. The
   satisfaction notification is edge-triggered: delivered exactly once, on the
   flip from not-satisfied to satisfied, then never again for that watch.
-- With `notifyChanges: true`, the watch also delivers a change notification
+- Change notifications are ON by default: every watch delivers a notification
   whenever a poll observes new commits, new reviews, new review threads, new
   review comments, new issue comments, a check-run state transition
   (pending → failed / passed), a mergeable-state transition (e.g.
@@ -41,10 +41,12 @@ name is baked into this plugin.
   signed and the newly failed check names are included, so a CI failure
   surfaces as `changes: checks: +1 failed, -1 pending, newly failed: lint`.
   Newly arrived comments are embedded with author, time, and body under a
-  `new comments:` block. Comment content is fetched over the REST endpoints
-  only when a comment count changed, so quiet polls cost nothing extra. A poll
-  that both satisfies the conditions and observes changes sends one combined
-  message.
+  `new comments:` block, so reviewer comments always reach the session with
+  their content. Comment content is fetched over the REST endpoints only when
+  a comment count changed, so quiet polls cost nothing extra. A poll that
+  both satisfies the conditions and observes changes sends one combined
+  message. Pass `notifyChanges: false` (per watch or in config) for a pure
+  ready-condition watch that only fires the single satisfied notification.
 - Notifications CUT INTO the target session by default: the default delivery
   mode is `steer` (interrupts at the nearest step boundary of a running turn;
   wakes an idle-loaded session). `followup` queues the notification as its own

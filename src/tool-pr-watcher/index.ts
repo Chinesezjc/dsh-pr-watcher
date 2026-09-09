@@ -166,9 +166,9 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'pr_watch',
     description: 'Register a watch on one GitHub pull request. The service polls the PR on a configurable '
-      + 'interval and delivers one notification that WAKES this session when the selected conditions are all '
-      + 'met (edge-triggered: only on the flip from not-met to met). With notifyChanges, it also notifies on '
-      + 'observed changes (new commits, new reviews, new comments, check-run or mergeable-state transitions) '
+      + 'interval and delivers one notification to THIS session when the selected conditions are all met '
+      + '(edge-triggered: only on the flip from not-met to met), and — by default — a notification for every '
+      + 'observed change (new comments with content, new commits, check-run or mergeable-state transitions) '
       + 'before the conditions are met. The default delivery cuts into this session (steer); pass delivery '
       + 'followup to queue behind current work, or inject to only seed context without waking. Run '
       + 'pr_watch_list to see active watches and pr_watch_remove to stop one.',
@@ -200,7 +200,9 @@ export function apply(ctx: Context): void {
       },
       notifyChanges: {
         type: 'boolean',
-        description: 'Also notify on observed changes before the conditions are met. Default false.',
+        description: 'Notify on observed changes (new comments with content, new commits, check-run and '
+          + 'mergeable-state transitions) before the conditions are met. Default true; pass false for a '
+          + 'pure ready-condition watch that only fires the single satisfied notification.',
       },
       delivery: {
         type: 'string',
@@ -248,7 +250,11 @@ export function apply(ctx: Context): void {
       }
       const id = args.id ?? `${args.repo}#${args.number}`
       const conditions = args.conditions ?? [...DEFAULT_CONDITIONS]
-      const notifyChanges = args.notifyChanges ?? false
+      // Change notifications are on by default: a watch exists to keep this
+      // session posted on the PR (new comments, commits, CI and mergeable
+      // transitions). Pass false for a pure ready-condition watch that only
+      // fires once.
+      const notifyChanges = args.notifyChanges ?? true
       const delivery = args.delivery as DeliveryMode | undefined
       const targetSessionId = String(sessionId)
       const result = prWatcher.watch({

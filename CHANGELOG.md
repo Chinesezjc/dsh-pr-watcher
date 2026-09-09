@@ -81,3 +81,11 @@
   step boundary of a running turn (and wakes an idle-loaded session) instead
   of queueing behind current work. `followup` (queue its own turn) and
   `inject` (silent seeding) remain available per watch / per config.
+
+## 0.10.0
+
+- Change notifications are ON by default: `pr_watch` (and config watches)
+  notify on every observed change — new comments with content, commits,
+  check-run and mergeable-state transitions — unless `notifyChanges: false`
+  is passed. Reviewer comments therefore always reach the session instead of
+  being gated behind an opt-in flag.

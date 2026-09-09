@@ -583,3 +583,13 @@ describe('backoff and satisfied-silence', () => {
     await dispose()
   })
 })
+
+describe('notifyChanges default', () => {
+  it('config watches default to change notifications on', async () => {
+    const { service, dispose } = await mounted({
+      watches: [{ id: 'cfg', repo: 'example-org/example-repo', number: 1, sessionId: 'sess-1' }],
+    })
+    expect(service.list()[0]!.notifyChanges).toBe(true)
+    await dispose()
+  })
+})

@@ -123,12 +123,12 @@ describe('tool-pr-watcher', () => {
     await dispose()
   })
 
-  it('pr_watch targets the calling session', async () => {
+  it('pr_watch defaults notifyChanges to true and targets the calling session', async () => {
     const service = fakeService()
     const { ctx, dispose } = await mounted(service)
     const tool = ctx.tools.get('pr_watch')!
     const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
-    const result = await tool.execute({ repo: 'example-org/example-repo', number: 1, notifyChanges: true }, exec)
+    const result = await tool.execute({ repo: 'example-org/example-repo', number: 1 }, exec)
     expect(service.watch).toHaveBeenCalledWith(expect.objectContaining({
       id: 'example-org/example-repo#1',
       repo: 'example-org/example-repo',
@@ -137,6 +137,19 @@ describe('tool-pr-watcher', () => {
       target: { sessionId: 'sess-9' },
     }))
     expect(result).toMatchObject({ ok: true, id: 'example-org/example-repo#1', sessionId: 'sess-9', notifyChanges: true })
+    await dispose()
+  })
+
+  it('pr_watch honors an explicit notifyChanges false', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch')!
+    const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
+    await tool.execute(
+      { repo: 'example-org/example-repo', number: 1, notifyChanges: false },
+      exec,
+    )
+    expect(service.watch).toHaveBeenCalledWith(expect.objectContaining({ notifyChanges: false }))
     await dispose()
   })
 

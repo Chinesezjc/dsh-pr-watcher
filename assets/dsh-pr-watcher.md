@@ -18,8 +18,10 @@ session when the conditions flip to satisfied, so you do not need to poll
   watch.
 - `pr_watch` — register a watch on a pull request. Notifications go to THIS
   session. Pass `repo` and `number`; optionally `id` (default
-  `owner/name#number`), `conditions`, `notifyChanges`, and `delivery`. The
-  first poll happens within one poll interval (default 60s).
+  `owner/name#number`), `conditions`, `notifyChanges` (default true — change
+  notifications, including comments with content, are on unless you pass
+  false), and `delivery`. The first poll happens within one poll interval
+  (default 60s).
 - `pr_watch_list` — list active watches: target PR, selected conditions,
   whether satisfied, whether already notified, last snapshot summary or fetch
   error, last poll time. Check this instead of re-querying the PR yourself.
@@ -53,18 +55,22 @@ moment a merge-forward against the base becomes necessary.
 
 ## Change notifications
 
-With `notifyChanges: true`, the watch also delivers a change notification
+Change notifications are ON by default: every watch delivers a notification
 whenever a poll observes new commits, new reviews, new review threads, new
 review comments, new issue comments, a **check-run state transition**
 (pending → failed / passed), a **mergeable-state transition** (e.g.
-`MERGEABLE -> CONFLICTING`), or a new conversation comment. Check deltas are
-signed and the newly failed check names are included, so a CI failure
-surfaces as `changes: checks: +1 failed, -1 pending, newly failed: lint`.
-Newly arrived comments are embedded with their author, time, and body under a
-`new comments:` block, so a woken agent knows what the reviewer said without
+`MERGEABLE -> CONFLICTING`), or a new conversation comment — so reviewer
+comments always reach you with their content. Check deltas are signed and the
+newly failed check names are included, so a CI failure surfaces as
+`changes: checks: +1 failed, -1 pending, newly failed: lint`. Newly arrived
+comments are embedded with their author, time, and body under a `new
+comments:` block, so a woken agent knows what the reviewer said without
 another query. The comment content is only fetched when a comment count
 changed, so quiet polls cost nothing extra. A poll that both satisfies the
 conditions and observes changes sends ONE combined message.
+
+Pass `notifyChanges: false` for a pure ready-condition watch that only fires
+the single satisfied notification and ignores everything else until then.
 
 ## Delivery
 
@@ -109,9 +115,10 @@ learn when the PR actually merges.
 ### CI monitoring patterns
 
 - **Hear about every CI transition, including red**: register the ready set
-  with `notifyChanges: true`. Every check-run flip (pending → failed/passed)
-  delivers a change notification naming the newly failed checks, and the final
-  all-green state delivers the satisfied notification.
+  (change notifications are on by default). Every check-run flip
+  (pending → failed/passed) delivers a change notification naming the newly
+  failed checks, and the final all-green state delivers the satisfied
+  notification.
 - **Only be told when CI breaks**: register `conditions: ["checksFailed"]`.
   The watch satisfies the moment any check fails and notifies once; the
   notification shows the failing check names.

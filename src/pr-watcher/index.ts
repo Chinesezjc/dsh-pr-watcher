@@ -120,7 +120,9 @@ const configWatchSchema = z.object({
   number: z.natural(),
   // Condition names are validated by PrWatcherService.assertConditions at load.
   conditions: z.array(z.string()).default([...DEFAULT_CONDITIONS]),
-  notifyChanges: z.boolean().default(false),
+  // Change notifications are on by default; a static watch that only wants
+  // the single satisfied notification sets this false.
+  notifyChanges: z.boolean().default(true),
   sessionId: z.string().default(''),
   delivery: deliverySchema.required(false),
 })
@@ -237,7 +239,7 @@ export class PrWatcherService extends Service {
         repo: watch.repo,
         number: watch.number,
         conditions,
-        notifyChanges: watch.notifyChanges ?? false,
+        notifyChanges: watch.notifyChanges ?? true,
         target: {
           sessionId,
           ...(watch.delivery === undefined ? {} : { delivery: watch.delivery }),
