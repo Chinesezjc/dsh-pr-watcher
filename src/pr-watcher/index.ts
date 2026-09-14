@@ -28,9 +28,11 @@ import {
   conditionsMet,
   diffSnapshots,
   evaluateConditions,
+  filterCommentAuthors,
 } from './conditions.ts'
 import {
   conversationCountsChanged,
+  fetchAuthenticatedLogin,
   fetchBranchSnapshot,
   fetchConversation,
   ghGraphql,
@@ -156,6 +158,8 @@ const configWatchSchema = z.object({
   // Change notifications are on by default; a static watch that only wants
   // the single satisfied notification sets this false.
   notifyChanges: z.boolean().default(true),
+  // Comment filtering is on by default; absent uses the service default.
+  ignoreOwnComments: z.boolean().required(false),
   sessionId: z.string().default(''),
   delivery: deliverySchema.required(false),
 })
@@ -174,6 +178,18 @@ export interface Config {
   readonly allowResume: boolean
   /** Default target session for static watches that omit their own sessionId. */
   readonly notifySessionId: string
+  /**
+   * Whether comments authored by the authenticated `gh` account are excluded
+   * from change notifications by default. Per-watch `ignoreOwnComments`
+   * overrides it. The account is shared with the operator, so a comment typed
+   * on github.com as that account is filtered too.
+   */
+  readonly ignoreOwnComments: boolean
+  /**
+   * Additional logins whose comments never count as changes, applied to every
+   * watch regardless of `ignoreOwnComments`.
+   */
+  readonly ignoreCommentAuthors: readonly string[]
   /** Static watches validated at load. */
   readonly watches: readonly ConfigWatch[]
   /**
@@ -195,6 +211,8 @@ export interface ConfigWatch {
   /** Condition names; validated by {@link PrWatcherService.assertConditions}. */
   readonly conditions?: readonly string[]
   readonly notifyChanges: boolean
+  /** Per-watch override of `Config.ignoreOwnComments`; absent uses the config default. */
+  readonly ignoreOwnComments?: boolean
   /** Target session; empty falls back to `Config.notifySessionId`. */
   readonly sessionId: string
   readonly delivery: DeliveryMode | undefined
@@ -213,6 +231,13 @@ const configSchema: Schemastery = z.object({
   allowResume: z.boolean().default(true),
   /** Default target session for static watches that omit their own sessionId. */
   notifySessionId: z.string().default(''),
+  /**
+   * Filter comments authored by the authenticated `gh` account out of change
+   * notifications. Per-watch `ignoreOwnComments` overrides this.
+   */
+  ignoreOwnComments: z.boolean().default(true),
+  /** Additional logins whose comments never count as changes. */
+  ignoreCommentAuthors: z.array(z.string()).default([]),
   /** Static watches validated at load. */
   watches: z.array(configWatchSchema).default([]),
   /**
@@ -238,8 +263,16 @@ export class PrWatcherService extends Service {
   private readonly ghTimeoutMs: number
   private readonly delivery: DeliveryMode
   private readonly allowResume: boolean
+  private readonly ignoreOwnComments: boolean
+  private readonly ignoreCommentAuthors: readonly string[]
   private readonly watches = new Map<string, WatchState>()
   private readonly stateFile: string
+  /** Login of the authenticated gh account; undefined until resolved. */
+  private selfLogin: string | undefined
+  /** Whether a resolution attempt already succeeded (failures retry next poll). */
+  private selfLoginResolved = false
+  /** Whether the resolution failure was already logged. */
+  private selfLoginWarned = false
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'prWatcher')
@@ -250,6 +283,8 @@ export class PrWatcherService extends Service {
     this.ghTimeoutMs = config.ghTimeoutMs ?? 30000
     this.delivery = config.delivery ?? 'steer'
     this.allowResume = config.allowResume ?? true
+    this.ignoreOwnComments = config.ignoreOwnComments ?? true
+    this.ignoreCommentAuthors = config.ignoreCommentAuthors ?? []
     this.stateFile = config.stateFile ?? ''
     const seen = new Set<string>()
     for (const watch of config.watches ?? []) {
@@ -289,6 +324,7 @@ export class PrWatcherService extends Service {
         ...target,
         conditions,
         notifyChanges: watch.notifyChanges ?? true,
+        ...(watch.ignoreOwnComments === undefined ? {} : { ignoreOwnComments: watch.ignoreOwnComments }),
         target: {
           sessionId,
           ...(watch.delivery === undefined ? {} : { delivery: watch.delivery }),
@@ -395,6 +431,7 @@ export class PrWatcherService extends Service {
       ...target,
       conditions: conditions as ConditionName[],
       notifyChanges: record.notifyChanges === true,
+      ...(typeof record.ignoreOwnComments === 'boolean' ? { ignoreOwnComments: record.ignoreOwnComments } : {}),
       target: {
         sessionId: targetSessionId,
         ...(delivery === undefined ? {} : { delivery }),
@@ -413,6 +450,7 @@ export class PrWatcherService extends Service {
         ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
         conditions: [...state.spec.conditions],
         notifyChanges: state.spec.notifyChanges,
+        ...(state.spec.ignoreOwnComments === undefined ? {} : { ignoreOwnComments: state.spec.ignoreOwnComments }),
         target: {
           sessionId: state.spec.target.sessionId,
           ...(state.spec.target.delivery === undefined ? {} : { delivery: state.spec.target.delivery }),
@@ -538,6 +576,7 @@ export class PrWatcherService extends Service {
       ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
       conditions: state.spec.conditions,
       notifyChanges: state.spec.notifyChanges,
+      ignoreOwnComments: state.spec.ignoreOwnComments ?? this.ignoreOwnComments,
       target: state.spec.target,
       satisfied: state.satisfied,
       notified: state.notified,
@@ -600,6 +639,43 @@ export class PrWatcherService extends Service {
     return fetchBranchSnapshot(this.ghPath, spec.repo, spec.branch, this.ghTimeoutMs)
   }
 
+  /**
+   * Login of the account `gh` is authenticated as, resolved at most once per
+   * process. A failure returns undefined and is retried on the next poll, so a
+   * transient gh outage does not disable comment filtering for the process.
+   * @returns the login, or undefined when gh cannot report it.
+   */
+  protected async resolveSelfLogin(): Promise<string | undefined> {
+    if (this.selfLoginResolved) return this.selfLogin
+    try {
+      this.selfLogin = await fetchAuthenticatedLogin(this.ghPath, this.ghTimeoutMs)
+      this.selfLoginResolved = true
+    } catch (error) {
+      if (!this.selfLoginWarned) {
+        this.selfLoginWarned = true
+        this.ctx.logger.warn('pr-watcher: cannot resolve the authenticated gh login, so own-comment'
+          + ` filtering is inactive: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    return this.selfLogin
+  }
+
+  /**
+   * Logins whose comments never count as a change for this watch: the
+   * configured list, plus the authenticated account when the watch filters its
+   * own comments (the service default, overridable per watch).
+   * @param spec - the watch being polled.
+   * @returns lowercased logins to filter; empty disables filtering.
+   */
+  protected async commentAuthorFilter(spec: WatchSpec): Promise<readonly string[]> {
+    const authors = this.ignoreCommentAuthors.map((author) => author.toLowerCase())
+    if (spec.ignoreOwnComments ?? this.ignoreOwnComments) {
+      const login = await this.resolveSelfLogin()
+      if (login !== undefined) authors.push(login.toLowerCase())
+    }
+    return authors
+  }
+
   /** Poll every registered watch once. */
   private async pollAll(): Promise<void> {
     for (const state of this.watches.values()) {
@@ -637,14 +713,29 @@ export class PrWatcherService extends Service {
     state.satisfied = satisfied
     if (satisfiedEdge) state.notified = true
 
-    const change = prev === undefined ? null : diffSnapshots(prev, snapshot)
+    const raw = prev === undefined ? null : diffSnapshots(prev, snapshot)
+    // Comments from filtered authors (by default the authenticated gh account,
+    // which this session itself posts through) are noise: they are dropped from
+    // the summary and from the count deltas they account for, so a poll whose
+    // only news is such a comment reports no change at all.
+    const filtered = raw !== null && raw.kind === 'pr'
+      ? filterCommentAuthors(raw, await this.commentAuthorFilter(state.spec))
+      : { change: raw, ignoredComments: 0 }
+    const change = filtered.change
     const changed = hasChanges(change)
 
     // A satisfied watch is done: after the single edge notification it stays
     // silent even when later changes arrive; a change-only watch (never
     // satisfied) keeps notifying as long as notifyChanges is on.
     if (!satisfiedEdge && !(state.spec.notifyChanges && changed && !state.notified)) return
-    const text = buildNotificationText(state.spec.id, snapshot, satisfied, satisfiedEdge, change)
+    const text = buildNotificationText(
+      state.spec.id,
+      snapshot,
+      satisfied,
+      satisfiedEdge,
+      change,
+      filtered.ignoredComments,
+    )
     const delivered = await this.deliver(state.spec.target, text)
     if (!delivered.delivered) {
       this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" notification not delivered: ${delivered.reason}`)
@@ -655,6 +746,7 @@ export class PrWatcherService extends Service {
       ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
       satisfied: satisfiedEdge,
       changed: satisfiedEdge ? change : (changed ? change : null),
+      ignoredComments: filtered.ignoredComments,
       delivered: delivered.delivered,
       text,
     })

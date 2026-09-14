@@ -4,6 +4,7 @@ import {
   BRANCH_QUERY,
   branchSnapshotFromGraphql,
   buildGhArgs,
+  loginFromUser,
   conversationCountsChanged,
   conversationFromRest,
   parseRepo,
@@ -289,5 +290,18 @@ describe('checkContexts', () => {
     const clean = snapshotFromGraphql('example-org/example-repo', 1, fixture())
     expect(clean.checkContexts).toBe(clean.checks.total)
     expect(clean.checksTruncated).toBe(false)
+  })
+})
+
+describe('loginFromUser', () => {
+  it('reads the login from a gh api user payload', () => {
+    expect(loginFromUser({ login: 'octocat', id: 1 })).toBe('octocat')
+  })
+
+  it('throws when the payload carries no usable login', () => {
+    expect(() => loginFromUser({})).toThrow(/no login/)
+    expect(() => loginFromUser({ login: '' })).toThrow(/no login/)
+    expect(() => loginFromUser({ login: 7 })).toThrow(/no login/)
+    expect(() => loginFromUser(null)).toThrow(/no login/)
   })
 })

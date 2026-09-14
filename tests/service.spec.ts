@@ -77,6 +77,8 @@ class TestService extends PrWatcherService {
   convImpl: ((spec: { repo: string; number: number }) => Promise<ConversationEntry[]>) | undefined
   /** Feeds the branch half of fetchSnapshot for branch watches. */
   branchImpl: ((spec: { repo: string; branch: string }) => Promise<BranchSnapshot>) | undefined
+  /** Login the comment filter treats as the watching account; tests pin it. */
+  login: string | undefined = 'watching-account'
   convCalls = 0
 
   protected override async fetchBase(spec: { repo: string; number: number }): Promise<PrSnapshot> {
@@ -93,6 +95,11 @@ class TestService extends PrWatcherService {
   protected override async fetchBranchBase(spec: { repo: string; branch: string }): Promise<BranchSnapshot> {
     if (this.branchImpl === undefined) throw new Error('no branchImpl configured')
     return this.branchImpl(spec)
+  }
+
+  /** Pin the authenticated login so unit tests never shell out to gh. */
+  protected override async resolveSelfLogin(): Promise<string | undefined> {
+    return this.login
   }
 }
 
@@ -803,5 +810,144 @@ describe('branch watches', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('own-comment filtering', () => {
+  const MINE: ConversationEntry = { key: 'issue-1', kind: 'issue', author: 'watching-account', createdAt: '2026-09-03T02:00:00Z', body: 'my own reply', url: 'u1' }
+  const THEIRS: ConversationEntry = { key: 'issue-2', kind: 'issue', author: 'reviewer', createdAt: '2026-09-03T03:00:00Z', body: 'please rename this', url: 'u2' }
+
+  /**
+   * Poll twice: pass 1 records the baseline with `windows[0]`, pass 2 returns
+   * `next` with `windows[1]`. The window must grow between passes, exactly like
+   * the REST endpoints do — returning the final window twice hides the new
+   * comment from the diff.
+   */
+  async function pollTwo(
+    service: TestService,
+    baseline: PrSnapshot,
+    next: PrSnapshot,
+    windows: ConversationEntry[][],
+  ): Promise<void> {
+    let pass = 0
+    service.fetchImpl = async () => (pass === 0 ? baseline : next)
+    service.convImpl = async () => windows[Math.min(pass, windows.length - 1)] ?? []
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    pass = 1
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+  }
+
+  it('does not notify when the only new comment is the watching account\'s own', async () => {
+    const { service, delivered, notifications, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'quiet-self', conditions: ['merged'], notifyChanges: true })
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 2, conversation: [MINE] }),
+      [[], [MINE]],
+    )
+    expect(delivered.get('sess-1')).toBeUndefined()
+    expect(notifications).toHaveLength(0)
+    await dispose()
+  })
+
+  it('notifies for another author and embeds only their comment', async () => {
+    const { service, delivered, notifications, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'mixed', conditions: ['merged'], notifyChanges: true })
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 3, conversation: [THEIRS, MINE] }),
+      [[], [THEIRS, MINE]],
+    )
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    const text = delivered.get('sess-1')![0]!
+    expect(text).toContain('please rename this')
+    expect(text).not.toContain('my own reply')
+    expect(text).toContain('note: 1 new comment from a filtered author was ignored')
+    expect(notifications[0]).toMatchObject({ ignoredComments: 1, delivered: true })
+  })
+
+  it('notifies about own comments when the watch opts out', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'loud-self', conditions: ['merged'], notifyChanges: true, ignoreOwnComments: false })
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 2, conversation: [MINE] }),
+      [[], [MINE]],
+    )
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(delivered.get('sess-1')![0]).toContain('my own reply')
+  })
+
+  it('filters configured extra authors regardless of the own-comment flag', async () => {
+    const { service, delivered, dispose } = await mounted(
+      { ignoreCommentAuthors: ['Reviewer'], ignoreOwnComments: false },
+      { liveIds: ['sess-1'] },
+    )
+    service.watch({ ...WATCH, id: 'extra', conditions: ['merged'], notifyChanges: true })
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 2, conversation: [THEIRS] }),
+      [[], [THEIRS]],
+    )
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await dispose()
+  })
+
+  it('counts comments when the authenticated login cannot be resolved', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.login = undefined
+    service.watch({ ...WATCH, id: 'unresolved', conditions: ['merged'], notifyChanges: true })
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 2, conversation: [MINE] }),
+      [[], [MINE]],
+    )
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    await dispose()
+  })
+
+  it('reports the effective flag in pr_watch_list and persists the override', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prw-filter-'))
+    const file = join(dir, 'state.json')
+    try {
+      const first = await mounted({ stateFile: file })
+      first.service.watch({ ...WATCH, id: 'default', conditions: ['merged'] })
+      first.service.watch({ ...WATCH, id: 'opted-out', conditions: ['merged'], ignoreOwnComments: false })
+      expect(first.service.list().map((w) => [w.id, w.ignoreOwnComments])).toEqual([
+        ['default', true],
+        ['opted-out', false],
+      ])
+      await first.dispose()
+      const second = await mounted({ stateFile: file })
+      expect(second.service.list().map((w) => [w.id, w.ignoreOwnComments])).toEqual([
+        ['default', true],
+        ['opted-out', false],
+      ])
+      await second.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps own comments as changes when the config disables the filter', async () => {
+    const { service, delivered, dispose } = await mounted(
+      { ignoreOwnComments: false },
+      { liveIds: ['sess-1'] },
+    )
+    service.watch({ ...WATCH, id: 'cfg-off', conditions: ['merged'], notifyChanges: true })
+    expect(service.list()[0]!.ignoreOwnComments).toBe(false)
+    await pollTwo(
+      service,
+      snapshot({ issueComments: 1, conversation: [] }),
+      snapshot({ issueComments: 2, conversation: [MINE] }),
+      [[], [MINE]],
+    )
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    await dispose()
   })
 })

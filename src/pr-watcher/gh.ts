@@ -437,6 +437,32 @@ export async function fetchConversation(
   return conversationFromRest(issueComments, reviewComments, reviews)
 }
 
+/**
+ * Read the login out of a `gh api user` payload.
+ * @param payload - the parsed REST response body.
+ * @returns the authenticated account's login.
+ * @throws when the payload carries no usable login.
+ */
+export function loginFromUser(payload: unknown): string {
+  const login = (payload as { login?: unknown } | null)?.login
+  if (typeof login !== 'string' || login === '') {
+    throw new Error('gh api user returned no login')
+  }
+  return login
+}
+
+/**
+ * Resolve the login of the account `gh` is authenticated as. Used to tell a
+ * watch's own comments from everyone else's; the caller caches the result.
+ * @param ghPath - path or name of the `gh` executable.
+ * @param timeoutMs - per-call timeout.
+ * @returns the login.
+ * @throws on non-zero exit, invalid JSON, or a payload without a login.
+ */
+export async function fetchAuthenticatedLogin(ghPath: string, timeoutMs: number): Promise<string> {
+  return loginFromUser(await ghApiJson(ghPath, 'user', timeoutMs))
+}
+
 /** Raw GraphQL shape of one branch ref lookup. */
 interface GraphQlRef {
   repository?: {

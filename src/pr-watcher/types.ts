@@ -77,6 +77,11 @@ export interface WatchSpec {
   readonly conditions: readonly ConditionName[]
   /** Notify on observed changes even before the conditions are satisfied. */
   readonly notifyChanges: boolean
+  /**
+   * Whether comments authored by the authenticated `gh` account are excluded
+   * from change notifications. Absent uses the service default.
+   */
+  readonly ignoreOwnComments?: boolean
   readonly target: WatchTarget
 }
 
@@ -228,6 +233,20 @@ export interface BranchChangeSummary {
 /** One watch's change summary, discriminated by the watched target kind. */
 export type ChangeSummary = PrChangeSummary | BranchChangeSummary
 
+/**
+ * Outcome of applying a comment-author filter to a PR change summary. The
+ * filtered summary is what drives both the notification decision and the
+ * rendered text; `ignoredComments` reports how many new comments were dropped,
+ * so a notification that fires for another reason can still say that comments
+ * from filtered authors arrived.
+ */
+export interface CommentFilterResult {
+  /** The summary with filtered comments removed and their count deltas reduced. */
+  readonly change: PrChangeSummary
+  /** How many new comments the filter dropped. */
+  readonly ignoredComments: number
+}
+
 /** Whether a change summary contains any observed change. */
 export function hasChanges(change: ChangeSummary | null): boolean {
   if (change === null) return false
@@ -258,6 +277,8 @@ export interface WatchStatus {
   readonly branch?: string
   readonly conditions: readonly ConditionName[]
   readonly notifyChanges: boolean
+  /** Whether comments from the authenticated gh account are filtered out (effective value). */
+  readonly ignoreOwnComments: boolean
   readonly target: WatchTarget
   /** Whether the conditions currently hold. */
   readonly satisfied: boolean
@@ -291,6 +312,8 @@ export interface WatchNotifyInfo {
   /** True when the notification was the satisfied transition; false for a change notification. */
   readonly satisfied: boolean
   readonly changed: ChangeSummary | null
+  /** New comments dropped by the author filter in this poll. */
+  readonly ignoredComments: number
   readonly delivered: boolean
   readonly text: string
 }

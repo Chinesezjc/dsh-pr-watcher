@@ -199,6 +199,41 @@ describe('tool-pr-watcher', () => {
     await dispose()
   })
 
+  it('pr_watch forwards the own-comment filter and reports it', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch')!
+    const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
+    const result = await tool.execute(
+      { repo: 'example-org/example-repo', number: 1, ignoreOwnComments: false },
+      exec,
+    )
+    expect(service.watch).toHaveBeenCalledWith(expect.objectContaining({ ignoreOwnComments: false }))
+    expect(result).toMatchObject({ ok: true, ignoreOwnComments: false })
+    const rendered = tool.output!.render!(
+      { repo: 'example-org/example-repo', number: 1 },
+      result as never,
+    )
+    expect((rendered as { text: string }[])[0]!.text).toContain('own comments: counted')
+    await dispose()
+  })
+
+  it('pr_watch omits the own-comment filter when it is not passed', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch')!
+    const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
+    const result = await tool.execute({ repo: 'example-org/example-repo', number: 1 }, exec)
+    const spec = (service.watch as unknown as { mock: { calls: [{ ignoreOwnComments?: boolean }][] } }).mock.calls[0]![0]
+    expect(spec.ignoreOwnComments).toBeUndefined()
+    const rendered = tool.output!.render!(
+      { repo: 'example-org/example-repo', number: 1 },
+      result as never,
+    )
+    expect((rendered as { text: string }[])[0]!.text).toContain('own comments: filtered out')
+    await dispose()
+  })
+
   it('pr_watch_list renders an empty list', async () => {
     const { ctx, dispose } = await mounted(fakeService())
     const tool = ctx.tools.get('pr_watch_list')!
@@ -293,6 +328,7 @@ describe('tool-pr-watcher', () => {
         branch: 'master',
         conditions: [],
         notifyChanges: true,
+        ignoreOwnComments: true,
         target: { sessionId: 'sess-1' },
         satisfied: false,
         notified: false,

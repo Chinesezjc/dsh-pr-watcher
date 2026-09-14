@@ -5,6 +5,7 @@ import {
   conditionsMet,
   diffSnapshots,
   evaluateConditions,
+  filterCommentAuthors,
   hasChanges,
   renderChanges,
 } from '../src/pr-watcher/conditions.ts'
@@ -389,5 +390,113 @@ describe('branch snapshots', () => {
     const text = buildNotificationText('watch-b', branch({ committedDate: '' }), false, false, null)
     expect(text).toContain(`head: ${'c'.repeat(40)}`)
     expect(text).not.toContain('changes:')
+  })
+})
+
+describe('filterCommentAuthors', () => {
+  const mine = {
+    key: 'issue-1',
+    kind: 'issue' as const,
+    author: 'watching-account',
+    createdAt: '2026-09-03T02:00:00Z',
+    body: 'my own reply',
+    url: 'u1',
+  }
+  const theirs = {
+    key: 'issue-2',
+    kind: 'issue' as const,
+    author: 'reviewer',
+    createdAt: '2026-09-03T03:00:00Z',
+    body: 'please rename this',
+    url: 'u2',
+  }
+
+  /** A PR change summary whose only news is `comments` plus the given deltas. */
+  function changeWith(overrides: Partial<PrChangeSummary> = {}): PrChangeSummary {
+    return {
+      kind: 'pr',
+      headRefOid: null,
+      headRefName: null,
+      commits: 0,
+      reviews: 0,
+      reviewThreads: 0,
+      reviewComments: 0,
+      issueComments: 0,
+      checks: { passed: 0, failed: 0, pending: 0 },
+      newlyFailedChecks: [],
+      mergeable: null,
+      newComments: [],
+      ...overrides,
+    }
+  }
+
+  it('returns the summary untouched for an empty filter or no new comments', () => {
+    const clean = changeWith({ issueComments: 1, newComments: [mine] })
+    expect(filterCommentAuthors(clean, [])).toEqual({ change: clean, ignoredComments: 0 })
+    const none = changeWith({ commits: 1 })
+    expect(filterCommentAuthors(none, ['watching-account'])).toEqual({ change: none, ignoredComments: 0 })
+  })
+
+  it('drops own comments and the count delta they account for', () => {
+    const change = changeWith({ issueComments: 1, newComments: [mine] })
+    const result = filterCommentAuthors(change, ['watching-account'])
+    expect(result.ignoredComments).toBe(1)
+    expect(result.change.newComments).toEqual([])
+    expect(result.change.issueComments).toBe(0)
+    // Nothing else moved, so the whole poll is not a change.
+    expect(hasChanges(result.change)).toBe(false)
+  })
+
+  it('matches authors case-insensitively and keeps other authors', () => {
+    const change = changeWith({ issueComments: 2, newComments: [theirs, mine] })
+    const result = filterCommentAuthors(change, ['Watching-Account'])
+    expect(result.change.newComments).toEqual([theirs])
+    expect(result.change.issueComments).toBe(1)
+    expect(result.ignoredComments).toBe(1)
+    expect(hasChanges(result.change)).toBe(true)
+  })
+
+  it('reduces review and inline deltas by the kinds it dropped', () => {
+    const review = { ...mine, key: 'review-3', kind: 'review' as const }
+    const inline = { ...mine, key: 'inline-4', kind: 'inline' as const }
+    const change = changeWith({
+      reviews: 1,
+      reviewComments: 1,
+      reviewThreads: 1,
+      newComments: [inline, review],
+    })
+    const result = filterCommentAuthors(change, ['watching-account'])
+    expect(result.change.reviews).toBe(0)
+    expect(result.change.reviewComments).toBe(0)
+    // A review thread that a filtered inline comment created is not explained
+    // by comment counts alone, so it stays a change.
+    expect(result.change.reviewThreads).toBe(1)
+    expect(hasChanges(result.change)).toBe(true)
+  })
+
+  it('never floors a count below zero when the window hides other comments', () => {
+    // Two comments arrived in total but only one (mine) is inside the window.
+    const change = changeWith({ issueComments: 2, newComments: [mine] })
+    const result = filterCommentAuthors(change, ['watching-account'])
+    expect(result.change.issueComments).toBe(1)
+    expect(hasChanges(result.change)).toBe(true)
+  })
+
+  it('reports the ignored count in the notification text', () => {
+    const change = changeWith({ commits: 1, issueComments: 1, newComments: [mine] })
+    const result = filterCommentAuthors(change, ['watching-account'])
+    const text = buildNotificationText('watch-1', snapshot(), false, false, result.change, result.ignoredComments)
+    expect(text).toContain('+1 commit')
+    expect(text).not.toContain('+1 issue comment')
+    expect(text).not.toContain('new comments:')
+    expect(text).toContain('note: 1 new comment from a filtered author was ignored')
+  })
+
+  it('pluralizes the ignored-comment note', () => {
+    const second = { ...mine, key: 'issue-5' }
+    const change = changeWith({ commits: 1, newComments: [mine, second] })
+    const result = filterCommentAuthors(change, ['watching-account'])
+    const text = buildNotificationText('watch-1', snapshot(), false, false, result.change, result.ignoredComments)
+    expect(text).toContain('note: 2 new comments from a filtered author were ignored')
   })
 })

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0
+
+- Own comments are no longer treated as changes: new comments authored by the
+  authenticated `gh` account are dropped from change notifications, and the
+  comment-count deltas they account for are reduced by the same amount, so a
+  poll whose only news is the session's own reply delivers nothing. The filter
+  is on by default (`ignoreOwnComments`, per watch or via config),
+  `ignoreCommentAuthors` filters further logins for every watch, a
+  notification that fires for another reason mentions the ignored comments
+  with a `note:` line, and `pr_status` still returns the full conversation.
+  The login is resolved once with `gh api user` and retried on the next poll
+  when it fails.
+- New `ignoreOwnComments` parameter on `pr_watch` and flag on `pr_watch_list`.
+
 ## 0.11.0
 
 - Watch a branch head as well as a pull request: `pr_watch` and `pr_status`

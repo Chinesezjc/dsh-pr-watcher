@@ -196,7 +196,9 @@ export function apply(ctx: Context): void {
       + 'notification for every observed change (new comments with content, new commits, check-run or '
       + 'mergeable-state transitions) before the conditions are met. A branch watch (pass branch instead of '
       + 'number) takes no conditions and notifies every time the branch head advances; use it to observe '
-      + 'master or a base branch moving. The default delivery cuts into this session (steer); pass delivery '
+      + 'master or a base branch moving. Comments from the authenticated gh account are not treated as '
+      + 'changes by default (ignoreOwnComments: false opts back in), so replies this session posts through '
+      + 'gh do not notify it again. The default delivery cuts into this session (steer); pass delivery '
       + 'followup to queue behind current work, or inject to only seed context without waking. Run '
       + 'pr_watch_list to see active watches and pr_watch_remove to stop one.',
     parameters: {
@@ -237,6 +239,12 @@ export function apply(ctx: Context): void {
           + 'mergeable-state transitions) before the conditions are met. Default true; pass false for a '
           + 'pure ready-condition watch that only fires the single satisfied notification.',
       },
+      ignoreOwnComments: {
+        type: 'boolean',
+        description: 'Do not treat comments authored by the authenticated gh account as changes. Default '
+          + 'true, so replies this session posts through gh do not notify it again; pass false to see '
+          + 'every comment, including ones written on github.com with the same account.',
+      },
       delivery: {
         type: 'string',
         enum: ['followup', 'steer', 'inject'],
@@ -259,6 +267,7 @@ export function apply(ctx: Context): void {
           branch: { type: 'string' },
           conditions: { type: 'array', items: { type: 'string' } },
           notifyChanges: { type: 'boolean' },
+          ignoreOwnComments: { type: 'boolean' },
           delivery: { type: 'string' },
           sessionId: { type: 'string' },
         },
@@ -275,6 +284,7 @@ export function apply(ctx: Context): void {
           text: `watch "${value.id ?? args.id}" registered: ${target}; `
             + `conditions: ${conditions.length === 0 ? 'none (notifies on every change)' : conditions.join(', ')}; `
             + `changes: ${value.notifyChanges ? 'on' : 'off'}; `
+            + `own comments: ${value.ignoreOwnComments === false ? 'counted' : 'filtered out'}; `
             + `notifying session ${value.sessionId} via ${mode}. The first poll happens within one poll interval.`,
         }]
       },
@@ -295,6 +305,7 @@ export function apply(ctx: Context): void {
       // transitions). Pass false for a pure ready-condition watch that only
       // fires once.
       const notifyChanges = args.notifyChanges ?? true
+      const ignoreOwnComments = args.ignoreOwnComments
       const delivery = args.delivery as DeliveryMode | undefined
       const targetSessionId = String(sessionId)
       const result = prWatcher.watch({
@@ -303,6 +314,7 @@ export function apply(ctx: Context): void {
         ...(isBranch ? { branch: args.branch as string } : { number: args.number as number }),
         conditions: conditions as never,
         notifyChanges,
+        ...(ignoreOwnComments === undefined ? {} : { ignoreOwnComments }),
         target: {
           sessionId: targetSessionId,
           ...(delivery === undefined ? {} : { delivery }),
@@ -316,6 +328,7 @@ export function apply(ctx: Context): void {
         ...(isBranch ? { branch: args.branch } : { number: args.number }),
         conditions,
         notifyChanges,
+        ...(ignoreOwnComments === undefined ? {} : { ignoreOwnComments }),
         ...(delivery === undefined ? {} : { delivery }),
         sessionId: targetSessionId,
       }
@@ -348,6 +361,7 @@ export function apply(ctx: Context): void {
                 satisfied: { type: 'boolean', required: true },
                 notified: { type: 'boolean', required: true },
                 notifyChanges: { type: 'boolean', required: true },
+                ignoreOwnComments: { type: 'boolean', required: true },
                 sessionId: { type: 'string', required: true },
                 delivery: { type: 'string' },
                 state: { type: 'string' },
@@ -370,7 +384,8 @@ export function apply(ctx: Context): void {
           const checks = watch.checks === undefined ? '' : `; ${watch.checks}`
           const error = watch.lastError === undefined ? '' : `; last error: ${watch.lastError}`
           return `${watch.id}: ${watch.target} ${state}${checks}`
-            + ` (satisfied=${watch.satisfied}, notified=${watch.notified}, changes=${watch.notifyChanges})`
+            + ` (satisfied=${watch.satisfied}, notified=${watch.notified}, changes=${watch.notifyChanges}`
+            + `, own-comment-filter=${watch.ignoreOwnComments})`
             + ` -> ${watch.sessionId}${error}`
         })
         return [{ type: 'text', text: lines.join('\n') }]
@@ -389,6 +404,7 @@ export function apply(ctx: Context): void {
             satisfied: watch.satisfied,
             notified: watch.notified,
             notifyChanges: watch.notifyChanges,
+            ignoreOwnComments: watch.ignoreOwnComments,
             sessionId: watch.target.sessionId,
             ...(watch.target.delivery === undefined ? {} : { delivery: watch.target.delivery }),
             ...(snapshot === undefined ? {} : snapshot.kind === 'branch'

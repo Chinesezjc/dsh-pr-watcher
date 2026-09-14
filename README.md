@@ -49,8 +49,10 @@ name is baked into this plugin.
   their content. Comment content is fetched over the REST endpoints only when
   a comment count changed, so quiet polls cost nothing extra. A poll that
   both satisfies the conditions and observes changes sends one combined
-  message. Pass `notifyChanges: false` (per watch or in config) for a pure
-  ready-condition watch that only fires the single satisfied notification.
+  message. Comments from the authenticated `gh` account are filtered out of
+  change notifications by default (see Own-comment filtering). Pass
+  `notifyChanges: false` (per watch or in config) for a pure ready-condition
+  watch that only fires the single satisfied notification.
 - Notifications CUT INTO the target session by default: the default delivery
   mode is `steer` (interrupts at the nearest step boundary of a running turn;
   wakes an idle-loaded session). `followup` queues the notification as its own
@@ -89,6 +91,28 @@ vacuous zero-check result. Snapshots flag when the 100-item check-context or
 review-thread window was smaller than the PR's real count, and
 `checksPassed`/`threadsResolved` fail closed on a truncated window — hidden
 failures or unresolved threads never read as green.
+
+### Own-comment filtering
+
+A session that replies to a reviewer through `gh` sees its own reply as a new
+comment on the next poll. Treating that as a change notifies the session about
+what it just did, so the filter is on by default (`ignoreOwnComments: true`):
+new comments authored by the authenticated `gh` account are dropped from the
+diff, and the comment-count deltas they account for are reduced by the same
+amount, so a poll whose only news is such a comment reports no change and
+delivers nothing. `Config.ignoreOwnComments` sets the default for watches that
+do not state their own preference; `Config.ignoreCommentAuthors` lists further
+logins to filter for every watch.
+
+The filter matches the ACCOUNT, not the writer: a comment typed on github.com
+while logged in as the same account is filtered too. Set
+`ignoreOwnComments: false` when that matters. When a notification fires for
+another reason and filtered comments were also present, the message states it
+with a `note: N new comments from a filtered author were ignored` line, so the
+receiver knows the conversation has more than the message shows. When `gh api
+user` cannot report a login, filtering is limited to `ignoreCommentAuthors` and
+the resolution is retried on the next poll. `pr_status` never filters: it
+returns the full conversation window.
 
 ### Branch watches
 
@@ -163,6 +187,16 @@ Static watches go in the profile overlay that overrides the bundle patch:
             sessionId: ""
 ```
 
+Comment filtering is configurable globally and per watch:
+
+```yaml
+- id: pr-watcher
+  name: dsh-pr-watcher/pr-watcher
+  config:
+    ignoreOwnComments: true
+    ignoreCommentAuthors: [some-bot-login]
+```
+
 Every static watch needs a notification target: its own `sessionId`, or the
 global `notifySessionId`. A watch with neither fails the load loudly. Duplicate
 watch ids, malformed `owner/name` references, unknown condition names, the
@@ -203,8 +237,8 @@ every change and restored on the next activation.
   exactly one of `number` / `branch`, plus optional `id` (default
   `owner/name#number` for a PR and `owner/name@branch` for a branch),
   `conditions` (default the ready set; must be empty for a branch watch),
-  `notifyChanges`, and `delivery`. The first poll happens within one poll
-  interval.
+  `notifyChanges`, `ignoreOwnComments` (default true), and `delivery`. The
+  first poll happens within one poll interval.
 - `pr_watch_list` — list active watches: id, target (PR or branch), conditions,
   whether satisfied, whether already notified, last snapshot summary, last
   fetch error, last poll time.
@@ -237,6 +271,7 @@ state: OPEN
 checks: 1 failed, 3 pending of 30
 review threads: 2 unresolved of 12
 changes: +1 commit, +2 review comments
+note: 1 new comment from a filtered author was ignored
 ```
 
 Branch watch change notification:
@@ -272,6 +307,10 @@ without parsing the message text.
   were fetched, so the session knows the counts above are partial.
 
 ## Failure behavior
+
+Resolving the authenticated login (`gh api user`) happens once per process on
+the first watch that needs it; a failure logs a warning, leaves own-comment
+filtering inactive for that poll, and is retried on the next one.
 
 A `gh` call that fails (non-zero exit, GraphQL error, invalid JSON) marks the
 watch's `lastError`, keeps the previous snapshot (so a transient outage never

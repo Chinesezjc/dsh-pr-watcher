@@ -6,9 +6,11 @@
 
 import type {
   ChangeSummary,
+  CommentFilterResult,
   ConditionName,
   ConditionResult,
   ConversationEntry,
+  PrChangeSummary,
   PrSnapshot,
   WatchSnapshot,
 } from './types.ts'
@@ -113,6 +115,47 @@ function signedCount(delta: number, label: string): string {
   return delta > 0 ? `+${delta} ${label}` : `${delta} ${label}`
 }
 
+/**
+ * Apply an author filter to a PR change summary. New comments authored by one
+ * of `authors` are dropped from the window, and the comment-count deltas they
+ * account for are reduced by the same amount (floored at zero, so a count move
+ * larger than the visible window still reports the remainder). A poll whose
+ * only news is a filtered comment therefore reports no change at all.
+ * @param change - the summary produced by {@link diffSnapshots}.
+ * @param authors - login names whose comments do not count as changes; matched
+ * case-insensitively. An empty list returns the summary unchanged.
+ * @returns the filtered summary plus how many comments were dropped.
+ */
+export function filterCommentAuthors(
+  change: PrChangeSummary,
+  authors: readonly string[],
+): CommentFilterResult {
+  if (authors.length === 0 || change.newComments.length === 0) {
+    return { change, ignoredComments: 0 }
+  }
+  const lowered = new Set(authors.map((author) => author.toLowerCase()))
+  const dropped = change.newComments.filter((entry) => lowered.has(entry.author.toLowerCase()))
+  if (dropped.length === 0) return { change, ignoredComments: 0 }
+  let issue = 0
+  let review = 0
+  let inline = 0
+  for (const entry of dropped) {
+    if (entry.kind === 'issue') issue += 1
+    else if (entry.kind === 'review') review += 1
+    else inline += 1
+  }
+  return {
+    change: {
+      ...change,
+      issueComments: Math.max(0, change.issueComments - issue),
+      reviews: Math.max(0, change.reviews - review),
+      reviewComments: Math.max(0, change.reviewComments - inline),
+      newComments: change.newComments.filter((entry) => !lowered.has(entry.author.toLowerCase())),
+    },
+    ignoredComments: dropped.length,
+  }
+}
+
 /** Render a `ChangeSummary` as a compact `changes:` line, empty when nothing changed. */
 export function renderChanges(change: ChangeSummary): string {
   if (change.kind === 'branch') {
@@ -157,6 +200,7 @@ export function renderChanges(change: ChangeSummary): string {
  * @param satisfied - whether the selected conditions are currently met.
  * @param satisfiedEdge - whether this poll flipped the watch into satisfied.
  * @param change - the diff vs the previous poll, or null for the first poll.
+ * @param ignoredComments - new comments dropped by the author filter this poll.
  * @returns the message text delivered to the target session.
  */
 export function buildNotificationText(
@@ -165,6 +209,7 @@ export function buildNotificationText(
   satisfied: boolean,
   satisfiedEdge: boolean,
   change: ChangeSummary | null,
+  ignoredComments = 0,
 ): string {
   const lines: string[] = []
   if (snapshot.kind === 'branch') {
@@ -205,6 +250,9 @@ export function buildNotificationText(
       for (const entry of shown) lines.push(renderCommentLine(entry))
       const hidden = newComments.length - shown.length
       if (hidden > 0) lines.push(`+${hidden} more`)
+    }
+    if (ignoredComments > 0) {
+      lines.push(`note: ${ignoredComments} new comment${ignoredComments === 1 ? '' : 's'} from a filtered author ${ignoredComments === 1 ? 'was' : 'were'} ignored`)
     }
   }
   if (satisfiedEdge) {

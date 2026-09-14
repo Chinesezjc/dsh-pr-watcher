@@ -25,8 +25,9 @@ ONE notification when a watch's conditions flip to satisfied, and — by default
   `branch`; optionally `id` (default `owner/name#number` for a PR watch and
   `owner/name@branch` for a branch watch), `conditions`, `notifyChanges`
   (default true — change notifications, including comments with content, are on
-  unless you pass false), and `delivery`. The first poll happens within one
-  poll interval (default 60s).
+  unless you pass false), `ignoreOwnComments` (default true — comments from the
+  authenticated `gh` account are not treated as changes), and `delivery`. The
+  first poll happens within one poll interval (default 60s).
 - `pr_watch_list` — list active watches: target (PR or branch), selected
   conditions, whether satisfied, whether already notified, last snapshot
   summary or fetch error, last poll time. Check this instead of re-querying the
@@ -77,6 +78,32 @@ conditions and observes changes sends ONE combined message.
 
 Pass `notifyChanges: false` for a pure ready-condition watch that only fires
 the single satisfied notification and ignores everything else until then.
+
+## Own comments are not changes
+
+Every comment you post through `gh` appears in the PR conversation on the next
+poll. Counting your own replies as changes would notify this session about what
+it just did, so `pr_watch` filters them out by default (`ignoreOwnComments`,
+default true): a poll whose only news is a comment from the authenticated `gh`
+account produces no notification at all, and when a notification fires for
+another reason the comment counts in it exclude your own comments.
+
+Two consequences to keep in mind:
+
+- The filter matches the `gh` ACCOUNT, not the process that wrote the comment.
+  A comment typed on github.com while logged in as that same account is
+  filtered too. Pass `ignoreOwnComments: false` on the watch (or set
+  `ignoreOwnComments: false` in the plugin config) when every comment must
+  count, for example when the operator replies in the web UI and expects the
+  watch to wake you.
+- When a notification fires for another reason and filtered comments were also
+  present, it says so: `note: 2 new comments from a filtered author were
+  ignored`. Treat that line as "there is more in the PR conversation than this
+  message shows" and call `pr_status` when it matters.
+
+`Config.ignoreCommentAuthors` lists further logins to filter for every watch,
+independently of `ignoreOwnComments`. `pr_status` never filters: it always
+shows the full conversation window.
 
 ## Branch watches
 
