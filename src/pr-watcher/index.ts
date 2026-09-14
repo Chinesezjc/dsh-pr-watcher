@@ -117,6 +117,25 @@ function backoffDelay(failures: number): number {
   return Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (failures - 1))
 }
 
+/** First pause when GitHub reports a rate limit; doubles per consecutive report. */
+const THROTTLE_BASE_MS = 120_000
+/** Ceiling for the service-wide rate-limit pause. */
+const THROTTLE_MAX_MS = 1_800_000
+/** Delay between two watch polls inside one cycle, so a cycle never bursts. */
+const POLL_PACING_MS = 250
+
+/**
+ * Whether a `gh` failure reports a GitHub rate limit. Covers the primary limit
+ * ("API rate limit already exceeded") and the secondary one ("You have exceeded
+ * a secondary rate limit"); the second is not visible in `gh api rate_limit`,
+ * so it can only be recognized from the failure text.
+ * @param message - the failure text.
+ * @returns whether the failure is a rate limit.
+ */
+export function isRateLimitMessage(message: string): boolean {
+  return /rate.?limit/i.test(message)
+}
+
 /**
  * Validate the exactly-one-of `number`/`branch` target selection shared by the
  * config schema, the persisted records, and the runtime `watch()` call.
@@ -273,6 +292,10 @@ export class PrWatcherService extends Service {
   private selfLoginResolved = false
   /** Whether the resolution failure was already logged. */
   private selfLoginWarned = false
+  /** Epoch ms until which no watch is polled because GitHub throttled us. */
+  private throttleUntil = 0
+  /** Consecutive rate-limit reports, driving the throttle pause length. */
+  private throttleReports = 0
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'prWatcher')
@@ -676,31 +699,83 @@ export class PrWatcherService extends Service {
     return authors
   }
 
-  /** Poll every registered watch once. */
+  /** Current epoch milliseconds; the throttle window is read through this seam. */
+  protected now(): number {
+    return Date.now()
+  }
+
+  /** Wait `ms` between two watch polls; tests run without the pacing wait. */
+  protected async pace(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => { setTimeout(resolve, ms) })
+  }
+
+  /**
+   * Poll every registered watch once, spaced by a short pacing delay so one
+   * cycle never issues every request at the same moment: a burst of requests
+   * is what trips GitHub's secondary rate limit. A rate limit pauses the whole
+   * service (see {@link PrWatcherService.pollWatch}), so the cycle stops
+   * instead of spending the remaining watches on calls that cannot succeed.
+   */
   private async pollAll(): Promise<void> {
-    for (const state of this.watches.values()) {
+    if (this.throttled()) return
+    const states = [...this.watches.values()]
+    const paceMs = states.length > 1
+      ? Math.max(0, Math.min(POLL_PACING_MS, Math.floor(this.pollIntervalMs / states.length)))
+      : 0
+    for (const [index, state] of states.entries()) {
+      if (this.throttled()) return
+      if (index > 0 && paceMs > 0) await this.pace(paceMs)
       await this.pollWatch(state)
+    }
+  }
+
+  /** Whether the service is inside a rate-limit pause. */
+  private throttled(): boolean {
+    return this.now() < this.throttleUntil
+  }
+
+  /**
+   * Record one GitHub rate-limit report and pause every watch. Pausing the
+   * service, rather than only the failing watch, is what lets the account
+   * recover: retrying the other watches into a throttled account keeps the
+   * throttle hot and delays the reset.
+   * @param message - the failure text, used for the log line.
+   */
+  private noteThrottle(message: string): void {
+    this.throttleReports += 1
+    const pause = Math.min(THROTTLE_MAX_MS, THROTTLE_BASE_MS * 2 ** (this.throttleReports - 1))
+    const first = !this.throttled()
+    this.throttleUntil = this.now() + pause
+    if (first) {
+      this.ctx.logger.warn(`pr-watcher: GitHub rate limit reported (${message}); pausing every watch`
+        + ` for ${Math.round(pause / 1000)}s`)
     }
   }
 
   /** Poll one watch: refresh the snapshot and handle notification edges. */
   private async pollWatch(state: WatchState): Promise<void> {
-    if (Date.now() < state.nextAttemptAt) return
+    if (this.throttled() || this.now() < state.nextAttemptAt) return
     const prev = state.snapshot
     let snapshot: WatchSnapshot
     try {
       snapshot = await this.fetchSnapshot(specTarget(state.spec), prev)
     } catch (error) {
       state.failures += 1
-      state.nextAttemptAt = Date.now() + backoffDelay(state.failures)
+      state.nextAttemptAt = this.now() + backoffDelay(state.failures)
       state.lastError = error instanceof Error ? error.message : String(error)
       state.lastPolledAt = new Date().toISOString()
+      if (isRateLimitMessage(state.lastError)) {
+        this.noteThrottle(state.lastError)
+        return
+      }
       this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" fetch failed: ${state.lastError}`
         + ` (backing off ${backoffDelay(state.failures) / 1000}s)`)
       return
     }
     state.failures = 0
     state.nextAttemptAt = 0
+    this.throttleReports = 0
+    this.throttleUntil = 0
     state.snapshot = snapshot
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()

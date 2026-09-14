@@ -30,8 +30,13 @@ name is baked into this plugin.
   head (`owner/name` + branch), selects conditions, and names a target session
   that receives notifications.
 - The service polls every watch on `pollIntervalMs` (default 60s) through
-  `gh api graphql` with one query per target. Overlapping poll cycles are
-  skipped, never queued.
+  `gh api graphql` with one query per target, paced 250ms apart so a cycle
+  never issues every request at the same moment. Overlapping poll cycles are
+  skipped, never queued. A rate-limit failure (primary or secondary, which
+  `gh api rate_limit` does not report) pauses EVERY watch for 120s, doubling
+  to a 30min ceiling on consecutive reports, because retrying the remaining
+  watches into a throttled account only keeps the throttle hot; a successful
+  poll ends the pause.
 - A watch is **satisfied** when all its selected conditions hold. The
   satisfaction notification is edge-triggered: delivered exactly once, on the
   flip from not-satisfied to satisfied, then never again for that watch.
@@ -307,6 +312,12 @@ without parsing the message text.
   were fetched, so the session knows the counts above are partial.
 
 ## Failure behavior
+
+GitHub's secondary rate limit is not visible in `gh api rate_limit`, so it is
+recognized from the failure text; the pause applies service-wide rather than
+per watch, and the first report of a pause is logged with its length. A poll
+cycle stops as soon as a watch reports a rate limit instead of spending its
+remaining watches on calls that cannot succeed.
 
 Resolving the authenticated login (`gh api user`) happens once per process on
 the first watch that needs it; a failure logs a warning, leaves own-comment

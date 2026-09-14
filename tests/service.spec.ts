@@ -1,7 +1,7 @@
 /** Host service: config validation, watch registry, poll transitions, delivery. */
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import PrWatcherService from '../src/pr-watcher/index.ts'
+import PrWatcherService, { isRateLimitMessage } from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { BranchSnapshot, ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -79,6 +79,10 @@ class TestService extends PrWatcherService {
   branchImpl: ((spec: { repo: string; branch: string }) => Promise<BranchSnapshot>) | undefined
   /** Login the comment filter treats as the watching account; tests pin it. */
   login: string | undefined = 'watching-account'
+  /** Pinned clock for the throttle window; undefined uses the real clock. */
+  clock: number | undefined
+  /** How many times the pacing delay was entered between two watch polls. */
+  paceCalls = 0
   convCalls = 0
 
   protected override async fetchBase(spec: { repo: string; number: number }): Promise<PrSnapshot> {
@@ -100,6 +104,16 @@ class TestService extends PrWatcherService {
   /** Pin the authenticated login so unit tests never shell out to gh. */
   protected override async resolveSelfLogin(): Promise<string | undefined> {
     return this.login
+  }
+
+  /** Advance the throttle window deterministically instead of waiting. */
+  protected override now(): number {
+    return this.clock ?? Date.now()
+  }
+
+  /** Never wait between watches in tests. */
+  protected override async pace(): Promise<void> {
+    this.paceCalls += 1
   }
 }
 
@@ -948,6 +962,97 @@ describe('own-comment filtering', () => {
       [[], [MINE]],
     )
     expect(delivered.get('sess-1')).toHaveLength(1)
+    await dispose()
+  })
+})
+
+describe('rate-limit handling', () => {
+  const RATE_LIMIT = 'gh: API rate limit already exceeded for user ID 75373981.'
+
+  it('recognizes primary and secondary rate-limit failures', () => {
+    expect(isRateLimitMessage(RATE_LIMIT)).toBe(true)
+    expect(isRateLimitMessage('You have exceeded a secondary rate limit')).toBe(true)
+    expect(isRateLimitMessage('graphql_rate_limit')).toBe(true)
+    expect(isRateLimitMessage('pull request not found')).toBe(false)
+    expect(isRateLimitMessage('Command failed: network timeout')).toBe(false)
+  })
+
+  it('pauses every watch on the first rate limit and resumes once the pause expires', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.clock = 1_000_000
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    service.watch({ ...WATCH, id: 'b', conditions: ['merged'] })
+    let calls = 0
+    service.fetchImpl = async () => {
+      calls += 1
+      throw new Error(RATE_LIMIT)
+    }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    // The cycle stops at the first throttled watch instead of spending the rest.
+    expect(calls).toBe(1)
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    // Past the 120s pause and the 30s per-watch backoff: both watches poll again.
+    service.clock = 1_000_000 + 121_000
+    service.fetchImpl = async () => { calls += 1; return snapshot() }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(3)
+    await dispose()
+  })
+
+  it('doubles the pause on a consecutive rate limit', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.clock = 1_000_000
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    service.fetchImpl = async () => { throw new Error(RATE_LIMIT) }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    service.clock = 1_000_000 + 121_000
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    // Second report doubles the pause to 240s, so 200s later is still paused.
+    const paused = service.clock + 200_000
+    let calls = 0
+    service.fetchImpl = async () => { calls += 1; return snapshot() }
+    service.clock = paused
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(0)
+    service.clock = paused + 41_000
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    await dispose()
+  })
+
+  it('a successful poll resets the pause length', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.clock = 1_000_000
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    let calls = 0
+    service.fetchImpl = async () => {
+      calls += 1
+      if (calls === 1 || calls === 3) throw new Error(RATE_LIMIT)
+      return snapshot()
+    }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    service.clock = 1_000_000 + 121_000
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(2)
+    // A second report after the success starts from the base pause again.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(3)
+    service.clock = 1_000_000 + 121_000 + 121_000
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(4)
+    await dispose()
+  })
+
+  it('paces watch polls inside a cycle and does not pace a single watch', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'a' })
+    service.fetchImpl = async () => snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(service.paceCalls).toBe(0)
+    service.watch({ ...WATCH, id: 'b' })
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(service.paceCalls).toBe(1)
     await dispose()
   })
 })

@@ -224,12 +224,21 @@ new comments:
 
 ## Failure behavior
 
-A transient `gh` failure (network, rate limit, GraphQL error) marks the
-watch's `lastError`, keeps the previous snapshot — it does NOT look like a
-change — and backs off that watch exponentially (30s doubling to a 10min
-ceiling). A PR or repository that does not exist reports `not found` and keeps
-the watch in the error state; call `pr_status` to re-check, or remove the
-watch.
+A transient `gh` failure (network, GraphQL error) marks the watch's
+`lastError`, keeps the previous snapshot — it does NOT look like a change —
+and backs off that watch exponentially (30s doubling to a 10min ceiling). A PR
+or repository that does not exist reports `not found` and keeps the watch in
+the error state; call `pr_status` to re-check, or remove the watch.
+
+A rate limit is handled service-wide: watches are polled 250ms apart so a cycle
+never bursts its requests, and a rate-limit failure pauses EVERY watch for 120s
+(doubling to a 30min ceiling on consecutive reports) instead of only the watch
+that failed. While paused, `pr_watch_list` keeps showing the rate-limit
+`lastError` and no snapshot updates arrive; polling resumes on its own once the
+pause expires, and a successful poll ends it early. GitHub's secondary rate
+limit does not appear in `gh api rate_limit`, so a pause can be the only
+symptom; if polls stay paused for a long time, reduce the number of watches,
+raise `pollIntervalMs`, or drop duplicate watches on the same PR.
 
 ## Operational notes
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.0
+
+- Survive GitHub rate limits instead of hammering through them: watches are
+  polled 250ms apart so a cycle never bursts its requests, a rate-limit failure
+  (primary or the secondary limit that `gh api rate_limit` does not report)
+  pauses EVERY watch for 120s with the pause doubling to a 30min ceiling on
+  consecutive reports, and a successful poll ends the pause. Previously a
+  throttled account kept all watches failing on every cycle, because each watch
+  retried independently.
+
 ## 0.12.0
 
 - Own comments are no longer treated as changes: new comments authored by the
