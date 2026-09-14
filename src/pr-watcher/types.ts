@@ -59,8 +59,10 @@ export interface WatchTarget {
 }
 
 /**
- * One watched pull request. `repo` is always `owner/name` supplied by the
- * caller; no repository name is baked into the plugin.
+ * One watched target: a pull request (`number`) or a branch head (`branch`,
+ * e.g. `master`). `repo` is always `owner/name` supplied by the caller; no
+ * repository name is baked into the plugin. Exactly one of `number`/`branch`
+ * is set.
  */
 export interface WatchSpec {
   /** Stable id used to register, list, and remove the watch. */
@@ -68,7 +70,9 @@ export interface WatchSpec {
   /** Repository as `owner/name`, e.g. `<owner>/<repo>`. */
   readonly repo: string
   /** Pull request number within the repository. */
-  readonly number: number
+  readonly number?: number
+  /** Branch name whose head is watched (e.g. `master`). */
+  readonly branch?: string
   /** Conditions ANDed for the satisfied notification; empty never satisfies. */
   readonly conditions: readonly ConditionName[]
   /** Notify on observed changes even before the conditions are satisfied. */
@@ -95,6 +99,7 @@ export interface CheckSummary {
  * poll skipped the conversation fetch because no comment count changed.
  */
 export interface PrSnapshot {
+  readonly kind: 'pr'
   readonly repo: string
   readonly number: number
   readonly url: string
@@ -150,6 +155,26 @@ export interface ConversationEntry {
   readonly path?: string
 }
 
+/**
+ * One observed branch head, used by watches registered with `branch` instead
+ * of a pull request number. `commits` is the branch's commit count, so a
+ * notification can state how many commits arrived with an advance.
+ */
+export interface BranchSnapshot {
+  readonly kind: 'branch'
+  readonly repo: string
+  readonly branch: string
+  readonly url: string
+  readonly headOid: string
+  /** ISO-8601 commit date of the branch head. */
+  readonly committedDate: string
+  /** Total commit count on the branch (history totalCount). */
+  readonly commits: number
+}
+
+/** One polled observation: a pull request or a branch head. */
+export type WatchSnapshot = PrSnapshot | BranchSnapshot
+
 /** Truth value of every evaluable condition for one snapshot. */
 export type ConditionResult = Record<ConditionName, boolean>
 
@@ -159,7 +184,8 @@ export type ConditionResult = Record<ConditionName, boolean>
  * `checks` carries the signed per-state check deltas, so check-run transitions
  * (pending → failed / passed) surface as change notifications.
  */
-export interface ChangeSummary {
+export interface PrChangeSummary {
+  readonly kind: 'pr'
   /** New head commit oid when the head ref moved. */
   readonly headRefOid: string | null
   /** New head branch name when the head ref moved. */
@@ -186,10 +212,29 @@ export interface ChangeSummary {
   readonly newComments: readonly ConversationEntry[]
 }
 
+/**
+ * What changed between two consecutive snapshots of the same branch head.
+ * `fromOid`/`toOid` differ exactly when the branch advanced (or was rewound);
+ * `commits` is the signed commit-count delta.
+ */
+export interface BranchChangeSummary {
+  readonly kind: 'branch'
+  readonly fromOid: string
+  readonly toOid: string
+  readonly commits: number
+  readonly committedDate: string
+}
+
+/** One watch's change summary, discriminated by the watched target kind. */
+export type ChangeSummary = PrChangeSummary | BranchChangeSummary
+
 /** Whether a change summary contains any observed change. */
 export function hasChanges(change: ChangeSummary | null): boolean {
-  return change !== null && (
-    change.headRefOid !== null
+  if (change === null) return false
+  if (change.kind === 'branch') {
+    return change.fromOid !== change.toOid || change.commits !== 0
+  }
+  return change.headRefOid !== null
     || change.commits > 0
     || change.reviews > 0
     || change.reviewThreads > 0
@@ -201,14 +246,16 @@ export function hasChanges(change: ChangeSummary | null): boolean {
     || change.newlyFailedChecks.length > 0
     || change.mergeable !== null
     || change.newComments.length > 0
-  )
 }
 
 /** Live view of one registered watch, surfaced by `pr_watch_list`. */
 export interface WatchStatus {
   readonly id: string
   readonly repo: string
-  readonly number: number
+  /** Pull request number; set for PR watches. */
+  readonly number?: number
+  /** Watched branch; set for branch watches. */
+  readonly branch?: string
   readonly conditions: readonly ConditionName[]
   readonly notifyChanges: boolean
   readonly target: WatchTarget
@@ -216,7 +263,7 @@ export interface WatchStatus {
   readonly satisfied: boolean
   /** Whether the satisfied notification was already delivered (edge-triggered). */
   readonly notified: boolean
-  readonly snapshot: PrSnapshot | undefined
+  readonly snapshot: WatchSnapshot | undefined
   readonly lastError: string | undefined
   readonly lastPolledAt: string | undefined
 }
@@ -226,7 +273,7 @@ export type WatchResult =
   | { readonly ok: false; readonly reason: string }
 
 export type QueryResult =
-  | { readonly ok: true; readonly snapshot: PrSnapshot }
+  | { readonly ok: true; readonly snapshot: WatchSnapshot }
   | { readonly ok: false; readonly reason: string }
 
 export type DeliveryResult =
@@ -237,7 +284,10 @@ export type DeliveryResult =
 export interface WatchNotifyInfo {
   readonly id: string
   readonly repo: string
-  readonly number: number
+  /** Pull request number; set for PR watches. */
+  readonly number?: number
+  /** Watched branch; set for branch watches. */
+  readonly branch?: string
   /** True when the notification was the satisfied transition; false for a change notification. */
   readonly satisfied: boolean
   readonly changed: ChangeSummary | null

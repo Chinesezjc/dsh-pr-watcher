@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.0
+
+- Watch a branch head as well as a pull request: `pr_watch` and `pr_status`
+  accept `branch` instead of `number` (id default `owner/name@branch`), and
+  config watches may declare `branch`. A branch watch takes no conditions and
+  never satisfies; it notifies on every observed head advance with the new
+  oid, commit date, and signed commit-count delta
+  (`changes: branch advanced <from> -> <to>, +N commits`). Use it to observe
+  `master` or a stack base moving. A branch watch that carries conditions or
+  disables change notifications is rejected: with nothing to satisfy it could
+  never notify.
+- `pr_status` and `pr_watch_list` cover branch snapshots: head oid, commit
+  date, commit count, and the target rendered as `owner/name@branch`.
+
 ## 0.7.0
 
 - Persist runtime watches: new `stateFile` config option writes the active

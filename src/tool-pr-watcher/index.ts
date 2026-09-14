@@ -15,7 +15,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 // Activates the `Context.prWatcher` merge declared by the pr-watcher service plugin.
 import type {} from '../pr-watcher/index.ts'
 import { renderCommentLine } from '../pr-watcher/conditions.ts'
-import { CONDITION_NAMES, DEFAULT_CONDITIONS, type DeliveryMode, type PrSnapshot } from '../pr-watcher/types.ts'
+import {
+  CONDITION_NAMES,
+  DEFAULT_CONDITIONS,
+  type DeliveryMode,
+  type WatchSnapshot,
+} from '../pr-watcher/types.ts'
 
 /** Services required before the tools can register. */
 export const inject = ['prWatcher', 'tools']
@@ -25,7 +30,15 @@ const CONDITION_ENUM = [...CONDITION_NAMES]
 const STATUS_CONVERSATION_LIMIT = 8
 
 /** Compact text summary of one snapshot, shared by several renders. */
-function snapshotLines(snapshot: PrSnapshot): string[] {
+function snapshotLines(snapshot: WatchSnapshot): string[] {
+  if (snapshot.kind === 'branch') {
+    return [
+      `${snapshot.repo}@${snapshot.branch}`,
+      `head: ${snapshot.headOid}${snapshot.committedDate === '' ? '' : ` (${snapshot.committedDate})`}`,
+      `commits: ${snapshot.commits}`,
+      `url: ${snapshot.url}`,
+    ]
+  }
   const lines: string[] = [
     `${snapshot.repo}#${snapshot.number} ${snapshot.state}${snapshot.merged ? ' (merged)' : ''}`,
     `checks: ${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checkContexts}`,
@@ -69,8 +82,9 @@ export function apply(ctx: Context): void {
     description: 'Query the current status of one GitHub pull request through the gh CLI: CI check counts '
       + '(failed/pending/total), unresolved review threads, mergeable state, review decision, head ref, '
       + 'activity counts, and the recent conversation (issue comments, review summaries, and inline review '
-      + 'comments with author, time, and body). Read-only; does not register a watch. Use pr_watch to be '
-      + 'notified when conditions are met instead of polling manually.',
+      + 'comments with author, time, and body). Pass branch instead of number to query a branch head '
+      + '(head commit, commit count, last commit date). Read-only; does not register a watch. Use pr_watch '
+      + 'to be notified when conditions are met instead of polling manually.',
     parameters: {
       repo: {
         type: 'string',
@@ -79,8 +93,11 @@ export function apply(ctx: Context): void {
       },
       number: {
         type: 'number',
-        required: true,
-        description: 'Pull request number.',
+        description: 'Pull request number; provide this or branch.',
+      },
+      branch: {
+        type: 'string',
+        description: 'Branch name whose head to query (e.g. `master`); provide this or number.',
       },
     },
     output: {
@@ -94,28 +111,31 @@ export function apply(ctx: Context): void {
             type: 'object',
             additionalProperties: false,
             properties: {
+              kind: { type: 'string', required: true },
               repo: { type: 'string', required: true },
-              number: { type: 'number', required: true },
+              number: { type: 'number' },
+              branch: { type: 'string' },
               url: { type: 'string' },
-              state: { type: 'string', required: true },
-              merged: { type: 'boolean', required: true },
+              headOid: { type: 'string' },
+              committedDate: { type: 'string' },
+              state: { type: 'string' },
+              merged: { type: 'boolean' },
               mergeable: { type: 'string' },
               reviewDecision: { type: 'string' },
               headRefName: { type: 'string' },
               headRefOid: { type: 'string' },
-              commits: { type: 'number', required: true },
-              reviews: { type: 'number', required: true },
-              reviewThreads: { type: 'number', required: true },
-              reviewComments: { type: 'number', required: true },
-              issueComments: { type: 'number', required: true },
-              unresolvedThreads: { type: 'number', required: true },
-              checksTruncated: { type: 'boolean', required: true },
-              threadsTruncated: { type: 'boolean', required: true },
-              checkContexts: { type: 'number', required: true },
-              failedChecks: { type: 'array', items: { type: 'string' }, required: true },
+              commits: { type: 'number' },
+              reviews: { type: 'number' },
+              reviewThreads: { type: 'number' },
+              reviewComments: { type: 'number' },
+              issueComments: { type: 'number' },
+              unresolvedThreads: { type: 'number' },
+              checksTruncated: { type: 'boolean' },
+              threadsTruncated: { type: 'boolean' },
+              checkContexts: { type: 'number' },
+              failedChecks: { type: 'array', items: { type: 'string' } },
               conversation: {
                 type: 'array',
-                required: true,
                 items: {
                   type: 'object',
                   additionalProperties: false,
@@ -151,25 +171,32 @@ export function apply(ctx: Context): void {
         if (value.snapshot === undefined) {
           return [{ type: 'text', text: 'pr_status: no snapshot' }]
         }
-        const snapshot = value.snapshot as unknown as PrSnapshot
+        const snapshot = value.snapshot as unknown as WatchSnapshot
         return [{ type: 'text', text: snapshotLines(snapshot).join('\n') }]
       },
     },
     async execute(args) {
+      if ((args.number === undefined) === (args.branch === undefined)) {
+        return { ok: false, reason: 'provide exactly one of number (pull request) or branch' } as never
+      }
       // The service's QueryResult union is structurally wider than the declared
       // output schema (nullable mergeable/reviewDecision); the schema is the
       // contract the model sees, so the cast is deliberate.
-      return prWatcher.check(args.repo, args.number) as never
+      return (args.branch === undefined
+        ? prWatcher.check(args.repo, args.number as number)
+        : prWatcher.checkBranch(args.repo, args.branch)) as never
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'pr_watch',
-    description: 'Register a watch on one GitHub pull request. The service polls the PR on a configurable '
-      + 'interval and delivers one notification to THIS session when the selected conditions are all met '
-      + '(edge-triggered: only on the flip from not-met to met), and — by default — a notification for every '
-      + 'observed change (new comments with content, new commits, check-run or mergeable-state transitions) '
-      + 'before the conditions are met. The default delivery cuts into this session (steer); pass delivery '
+    description: 'Register a watch on one GitHub pull request, or on a branch head. The service polls the '
+      + 'target on a configurable interval and delivers one notification to THIS session when the selected '
+      + 'conditions are all met (edge-triggered: only on the flip from not-met to met), and — by default — a '
+      + 'notification for every observed change (new comments with content, new commits, check-run or '
+      + 'mergeable-state transitions) before the conditions are met. A branch watch (pass branch instead of '
+      + 'number) takes no conditions and notifies every time the branch head advances; use it to observe '
+      + 'master or a base branch moving. The default delivery cuts into this session (steer); pass delivery '
       + 'followup to queue behind current work, or inject to only seed context without waking. Run '
       + 'pr_watch_list to see active watches and pr_watch_remove to stop one.',
     parameters: {
@@ -180,19 +207,25 @@ export function apply(ctx: Context): void {
       },
       number: {
         type: 'number',
-        required: true,
-        description: 'Pull request number.',
+        description: 'Pull request number; provide this or branch.',
+      },
+      branch: {
+        type: 'string',
+        description: 'Branch name whose head is watched (e.g. `master`); provide this or number. '
+          + 'Branch watches take no conditions and notify on every head advance.',
       },
       id: {
         type: 'string',
-        description: 'Watch id; defaults to `<repo>#<number>`. Must be unique among active watches.',
+        description: 'Watch id; defaults to `<repo>#<number>` for a PR watch and `<repo>@<branch>` for a '
+          + 'branch watch. Must be unique among active watches.',
       },
       conditions: {
         type: 'array',
         items: { type: 'string', enum: CONDITION_ENUM },
         description: 'Conditions ANDed for the satisfied notification. Valid values: '
           + CONDITION_ENUM.join(', ')
-          + '. Defaults to the ready set: checksPassed, threadsResolved, mergeable, reviewApproved. '
+          + '. Defaults to the ready set: checksPassed, threadsResolved, mergeable, reviewApproved; must be '
+          + 'empty for a branch watch. '
           + 'Use checksFailed alone to be notified once when CI turns red, and conflicted alone to be '
           + 'notified the moment a merge-forward against the base becomes necessary. '
           + 'merged+closed, checksPassed+checksFailed, and mergeable+conflicted are contradictory '
@@ -223,6 +256,7 @@ export function apply(ctx: Context): void {
           id: { type: 'string' },
           repo: { type: 'string' },
           number: { type: 'number' },
+          branch: { type: 'string' },
           conditions: { type: 'array', items: { type: 'string' } },
           notifyChanges: { type: 'boolean' },
           delivery: { type: 'string' },
@@ -235,10 +269,12 @@ export function apply(ctx: Context): void {
         }
         const mode = deliveryMode(value.delivery as DeliveryMode | undefined, 'steer (default, cuts in)')
         const conditions = (value.conditions as string[] | undefined) ?? []
+        const target = value.branch === undefined ? `${value.repo}#${value.number}` : `${value.repo}@${value.branch}`
         return [{
           type: 'text',
-          text: `watch "${value.id ?? args.id}" registered: ${value.repo}#${value.number}; `
-            + `conditions: ${conditions.join(', ')}; changes: ${value.notifyChanges ? 'on' : 'off'}; `
+          text: `watch "${value.id ?? args.id}" registered: ${target}; `
+            + `conditions: ${conditions.length === 0 ? 'none (notifies on every change)' : conditions.join(', ')}; `
+            + `changes: ${value.notifyChanges ? 'on' : 'off'}; `
             + `notifying session ${value.sessionId} via ${mode}. The first poll happens within one poll interval.`,
         }]
       },
@@ -248,10 +284,14 @@ export function apply(ctx: Context): void {
       if (sessionId === undefined) {
         return { ok: false, reason: 'no agent session context for this tool call' }
       }
-      const id = args.id ?? `${args.repo}#${args.number}`
-      const conditions = args.conditions ?? [...DEFAULT_CONDITIONS]
+      if ((args.number === undefined) === (args.branch === undefined)) {
+        return { ok: false, reason: 'provide exactly one of number (pull request) or branch' }
+      }
+      const isBranch = args.branch !== undefined
+      const id = args.id ?? (isBranch ? `${args.repo}@${args.branch}` : `${args.repo}#${args.number}`)
+      const conditions = args.conditions ?? (isBranch ? [] : [...DEFAULT_CONDITIONS])
       // Change notifications are on by default: a watch exists to keep this
-      // session posted on the PR (new comments, commits, CI and mergeable
+      // session posted on the target (new comments, commits, CI and mergeable
       // transitions). Pass false for a pure ready-condition watch that only
       // fires once.
       const notifyChanges = args.notifyChanges ?? true
@@ -260,8 +300,8 @@ export function apply(ctx: Context): void {
       const result = prWatcher.watch({
         id,
         repo: args.repo,
-        number: args.number,
-        conditions,
+        ...(isBranch ? { branch: args.branch as string } : { number: args.number as number }),
+        conditions: conditions as never,
         notifyChanges,
         target: {
           sessionId: targetSessionId,
@@ -273,7 +313,7 @@ export function apply(ctx: Context): void {
         ok: true,
         id: result.id,
         repo: args.repo,
-        number: args.number,
+        ...(isBranch ? { branch: args.branch } : { number: args.number }),
         conditions,
         notifyChanges,
         ...(delivery === undefined ? {} : { delivery }),
@@ -284,9 +324,9 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'pr_watch_list',
-    description: 'List every active PR watch: id, repository, PR number, selected conditions, whether the '
-      + 'conditions currently hold, whether the satisfied notification was already delivered, the target '
-      + 'session, the last snapshot summary (or the last fetch error), and the last poll time.',
+    description: 'List every active watch: id, repository, target (PR number or branch), selected conditions, '
+      + 'whether the conditions currently hold, whether the satisfied notification was already delivered, the '
+      + 'target session, the last snapshot summary (or the last fetch error), and the last poll time.',
     parameters: {},
     output: {
       schema: {
@@ -301,7 +341,9 @@ export function apply(ctx: Context): void {
               properties: {
                 id: { type: 'string', required: true },
                 repo: { type: 'string', required: true },
-                number: { type: 'number', required: true },
+                number: { type: 'number' },
+                branch: { type: 'string' },
+                target: { type: 'string', required: true },
                 conditions: { type: 'array', items: { type: 'string' }, required: true },
                 satisfied: { type: 'boolean', required: true },
                 notified: { type: 'boolean', required: true },
@@ -321,13 +363,13 @@ export function apply(ctx: Context): void {
       render: (_args, value) => {
         const watches = value.watches ?? []
         if (watches.length === 0) {
-          return [{ type: 'text', text: 'no active PR watches' }]
+          return [{ type: 'text', text: 'no active watches' }]
         }
         const lines = watches.map((watch) => {
           const state = watch.state === undefined ? 'no snapshot yet' : watch.state
           const checks = watch.checks === undefined ? '' : `; ${watch.checks}`
           const error = watch.lastError === undefined ? '' : `; last error: ${watch.lastError}`
-          return `${watch.id}: ${watch.repo}#${watch.number} ${state}${checks}`
+          return `${watch.id}: ${watch.target} ${state}${checks}`
             + ` (satisfied=${watch.satisfied}, notified=${watch.notified}, changes=${watch.notifyChanges})`
             + ` -> ${watch.sessionId}${error}`
         })
@@ -336,32 +378,42 @@ export function apply(ctx: Context): void {
     },
     async execute() {
       return {
-        watches: prWatcher.list().map((watch) => ({
-          id: watch.id,
-          repo: watch.repo,
-          number: watch.number,
-          conditions: [...watch.conditions],
-          satisfied: watch.satisfied,
-          notified: watch.notified,
-          notifyChanges: watch.notifyChanges,
-          sessionId: watch.target.sessionId,
-          ...(watch.target.delivery === undefined ? {} : { delivery: watch.target.delivery }),
-          ...(watch.snapshot === undefined ? {} : {
-            state: watch.snapshot.state,
-            checks: `${watch.snapshot.checks.failed} failed, ${watch.snapshot.checks.pending} pending of ${watch.snapshot.checks.total}`,
-            unresolvedThreads: watch.snapshot.unresolvedThreads,
-          }),
-          ...(watch.lastError === undefined ? {} : { lastError: watch.lastError }),
-          ...(watch.lastPolledAt === undefined ? {} : { lastPolledAt: watch.lastPolledAt }),
-        })),
+        watches: prWatcher.list().map((watch) => {
+          const snapshot = watch.snapshot
+          return {
+            id: watch.id,
+            repo: watch.repo,
+            ...(watch.number === undefined ? { branch: watch.branch } : { number: watch.number }),
+            target: watch.number === undefined ? `${watch.repo}@${watch.branch}` : `${watch.repo}#${watch.number}`,
+            conditions: [...watch.conditions],
+            satisfied: watch.satisfied,
+            notified: watch.notified,
+            notifyChanges: watch.notifyChanges,
+            sessionId: watch.target.sessionId,
+            ...(watch.target.delivery === undefined ? {} : { delivery: watch.target.delivery }),
+            ...(snapshot === undefined ? {} : snapshot.kind === 'branch'
+              ? {
+                state: `branch ${snapshot.branch}`,
+                checks: `head ${snapshot.headOid.slice(0, 8)} of ${snapshot.commits} commits`,
+              }
+              : {
+                state: snapshot.state,
+                checks: `${snapshot.checks.failed} failed, ${snapshot.checks.pending} pending of ${snapshot.checks.total}`,
+                unresolvedThreads: snapshot.unresolvedThreads,
+              }),
+            ...(watch.lastError === undefined ? {} : { lastError: watch.lastError }),
+            ...(watch.lastPolledAt === undefined ? {} : { lastPolledAt: watch.lastPolledAt }),
+          }
+        }),
       }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'pr_watch_remove',
-    description: 'Stop a PR watch by id. Only runtime-registered watches can be removed; static watches '
-      + 'configured in the plugin config are not removable through this tool. See pr_watch_list for ids.',
+    description: 'Stop a watch by id (pull request or branch). Only runtime-registered watches can be '
+      + 'removed; static watches configured in the plugin config are not removable through this tool. See '
+      + 'pr_watch_list for ids.',
     parameters: {
       id: {
         type: 'string',

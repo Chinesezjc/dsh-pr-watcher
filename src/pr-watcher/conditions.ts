@@ -4,7 +4,14 @@
  * @module dsh-pr-watcher
  */
 
-import type { ChangeSummary, ConditionName, ConditionResult, ConversationEntry, PrSnapshot } from './types.ts'
+import type {
+  ChangeSummary,
+  ConditionName,
+  ConditionResult,
+  ConversationEntry,
+  PrSnapshot,
+  WatchSnapshot,
+} from './types.ts'
 
 export { hasChanges } from './types.ts'
 
@@ -56,15 +63,27 @@ export function conditionsMet(conditions: readonly ConditionName[], result: Cond
 }
 
 /**
- * Diff two consecutive snapshots of the same PR.
+ * Diff two consecutive snapshots of the same target.
  * @param prev - the earlier snapshot.
  * @param next - the later snapshot.
  * @returns the deltas; null fields mean unchanged, counts are signed deltas.
+ * Returns null when the target kind changed (never happens for one watch).
  */
-export function diffSnapshots(prev: PrSnapshot, next: PrSnapshot): ChangeSummary {
+export function diffSnapshots(prev: WatchSnapshot, next: WatchSnapshot): ChangeSummary | null {
+  if (prev.kind === 'branch' || next.kind === 'branch') {
+    if (prev.kind !== 'branch' || next.kind !== 'branch') return null
+    return {
+      kind: 'branch',
+      fromOid: prev.headOid,
+      toOid: next.headOid,
+      commits: next.commits - prev.commits,
+      committedDate: next.committedDate,
+    }
+  }
   const prevFailed = new Set(prev.failedChecks)
   const prevComments = new Set(prev.conversation.map((entry) => entry.key))
   return {
+    kind: 'pr',
     headRefOid: prev.headRefOid !== next.headRefOid ? next.headRefOid : null,
     headRefName: prev.headRefName !== next.headRefName ? next.headRefName : null,
     commits: Math.max(0, next.commits - prev.commits),
@@ -96,6 +115,16 @@ function signedCount(delta: number, label: string): string {
 
 /** Render a `ChangeSummary` as a compact `changes:` line, empty when nothing changed. */
 export function renderChanges(change: ChangeSummary): string {
+  if (change.kind === 'branch') {
+    // An unchanged head with an unchanged commit count is no change at all;
+    // match {@link hasChanges} so a caller that always renders never prints a
+    // non-change line.
+    if (change.fromOid === change.toOid && change.commits === 0) return ''
+    const parts: string[] = [`${shortOid(change.fromOid)} -> ${shortOid(change.toOid)}`]
+    if (change.commits > 0) parts.push(`+${change.commits} commit${change.commits === 1 ? '' : 's'}`)
+    else if (change.commits < 0) parts.push(`${change.commits} commits (rewritten)`)
+    return `changes: branch advanced ${parts.join(', ')}`
+  }
   const parts: string[] = []
   if (change.headRefOid !== null) {
     parts.push(`head moved to ${shortOid(change.headRefOid)}`)
@@ -132,12 +161,23 @@ export function renderChanges(change: ChangeSummary): string {
  */
 export function buildNotificationText(
   id: string,
-  snapshot: PrSnapshot,
+  snapshot: WatchSnapshot,
   satisfied: boolean,
   satisfiedEdge: boolean,
   change: ChangeSummary | null,
 ): string {
   const lines: string[] = []
+  if (snapshot.kind === 'branch') {
+    lines.push(`PR watch "${id}" changed: ${snapshot.repo}@${snapshot.branch} (${snapshot.url})`)
+    lines.push(`branch: ${snapshot.branch}`)
+    lines.push(`head: ${snapshot.headOid}${snapshot.committedDate === '' ? '' : ` (${snapshot.committedDate})`}`)
+    lines.push(`commits: ${snapshot.commits}`)
+    if (change !== null) {
+      const changesLine = renderChanges(change)
+      if (changesLine !== '') lines.push(changesLine)
+    }
+    return lines.join('\n')
+  }
   if (satisfiedEdge) {
     lines.push(`PR watch "${id}" conditions met: ${snapshot.repo}#${snapshot.number} (${snapshot.url})`)
   } else {
@@ -158,11 +198,12 @@ export function buildNotificationText(
   if (change !== null) {
     const changesLine = renderChanges(change)
     if (changesLine !== '') lines.push(changesLine)
-    if (change.newComments.length > 0) {
+    const newComments = change.kind === 'pr' ? change.newComments : []
+    if (newComments.length > 0) {
       lines.push('new comments:')
-      const shown = change.newComments.slice(0, NOTICE_COMMENT_LIMIT)
+      const shown = newComments.slice(0, NOTICE_COMMENT_LIMIT)
       for (const entry of shown) lines.push(renderCommentLine(entry))
-      const hidden = change.newComments.length - shown.length
+      const hidden = newComments.length - shown.length
       if (hidden > 0) lines.push(`+${hidden} more`)
     }
   }

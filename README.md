@@ -1,9 +1,10 @@
 # dsh-pr-watcher
 
 GitHub pull-request watcher for DeepSeek Harness (DSH): a host service that
-polls PR status through the `gh` CLI and delivers a notification message into
-an agent session when configured conditions are met, plus model-facing tools to
-query status and manage watches.
+polls PR status and branch heads through the `gh` CLI and delivers a
+notification message into an agent session when configured conditions are met
+or the observed target changes, plus model-facing tools to query status and
+manage watches.
 
 The plugin is a Cordis profile bundle (`dsh.bundle.patch`) in the same shape as
 [`dsh-interconnect`](https://github.com/Chinesezjc/dsh-interconnect): a
@@ -25,14 +26,17 @@ name is baked into this plugin.
 
 ## How it works
 
-- A **watch** targets one pull request (`owner/name` + number), selects
-  conditions, and names a target session that receives notifications.
+- A **watch** targets one pull request (`owner/name` + number) or one branch
+  head (`owner/name` + branch), selects conditions, and names a target session
+  that receives notifications.
 - The service polls every watch on `pollIntervalMs` (default 60s) through
-  `gh api graphql` with one query per PR. Overlapping poll cycles are skipped,
-  never queued.
+  `gh api graphql` with one query per target. Overlapping poll cycles are
+  skipped, never queued.
 - A watch is **satisfied** when all its selected conditions hold. The
   satisfaction notification is edge-triggered: delivered exactly once, on the
   flip from not-satisfied to satisfied, then never again for that watch.
+  Branch watches have no conditions: they are pure change watches that notify
+  every time the head commit moves.
 - Change notifications are ON by default: every watch delivers a notification
   whenever a poll observes new commits, new reviews, new review threads, new
   review comments, new issue comments, a check-run state transition
@@ -85,6 +89,17 @@ vacuous zero-check result. Snapshots flag when the 100-item check-context or
 review-thread window was smaller than the PR's real count, and
 `checksPassed`/`threadsResolved` fail closed on a truncated window — hidden
 failures or unresolved threads never read as green.
+
+### Branch watches
+
+A watch registered with `branch` instead of `number` observes a branch head
+(GraphQL `ref(qualifiedName: "refs/heads/<branch>")`). It takes no conditions
+and never satisfies; it notifies on every observed head advance with the new
+oid, its commit date, and the signed commit-count delta
+(`changes: branch advanced 9f8e7d6c -> 1a2b3c4d, +2 commits`). Use it to be
+told that a base branch moved under you instead of polling `git fetch`. Since a
+branch watch has no conditions to satisfy, `notifyChanges: false` is rejected
+for it: such a watch could never notify at all.
 
 ## Requirements
 
@@ -142,12 +157,18 @@ Static watches go in the profile overlay that overrides the bundle patch:
             notifyChanges: true
             sessionId: ""
             delivery: steer
+          - id: example-branch
+            repo: example-org/example-repo
+            branch: master
+            sessionId: ""
 ```
 
 Every static watch needs a notification target: its own `sessionId`, or the
 global `notifySessionId`. A watch with neither fails the load loudly. Duplicate
-watch ids, malformed `owner/name` references, unknown condition names, and the
-`merged`+`closed` pair also fail at load.
+watch ids, malformed `owner/name` references, unknown condition names, the
+`merged`+`closed` pair, a watch that sets both `number` and `branch` (or
+neither), and a branch watch that carries conditions or disables change
+notifications all fail at load.
 
 The `gh` binary path and per-call timeout are configurable (`ghPath`,
 `ghTimeoutMs`). The minimum poll interval is 30s. Set `stateFile` to a file
@@ -172,18 +193,21 @@ calling session, so no configuration is needed for the common case. With
 `stateFile` configured, registrations and removals are persisted atomically on
 every change and restored on the next activation.
 
-- `pr_status` — one-shot status of a PR: check counts, unresolved review
+- `pr_status` — one-shot status of a PR or a branch head. Pass `repo` and
+  exactly one of `number` / `branch`. For a PR: check counts, unresolved review
   threads, mergeable state, review decision, head ref, activity counts, and
   the recent conversation (issue comments, review summaries, inline review
-  comments; newest first with author, time, body). Read-only; registers
-  nothing.
-- `pr_watch` — register a watch on the calling session. Accepts optional
-  `id` (default `owner/name#number`), `conditions` (default the ready set),
+  comments; newest first with author, time, body). For a branch: head oid,
+  commit date, and commit count. Read-only; registers nothing.
+- `pr_watch` — register a watch on the calling session. Pass `repo` and
+  exactly one of `number` / `branch`, plus optional `id` (default
+  `owner/name#number` for a PR and `owner/name@branch` for a branch),
+  `conditions` (default the ready set; must be empty for a branch watch),
   `notifyChanges`, and `delivery`. The first poll happens within one poll
   interval.
-- `pr_watch_list` — list active watches: id, target PR, conditions, whether
-  satisfied, whether already notified, last snapshot summary, last fetch
-  error, last poll time.
+- `pr_watch_list` — list active watches: id, target (PR or branch), conditions,
+  whether satisfied, whether already notified, last snapshot summary, last
+  fetch error, last poll time.
 - `pr_watch_remove` — stop a runtime-registered watch by id. Static config
   watches are not removable through this tool.
 
@@ -215,14 +239,28 @@ review threads: 2 unresolved of 12
 changes: +1 commit, +2 review comments
 ```
 
+Branch watch change notification:
+
+```
+PR watch "example-branch" changed: example-org/example-repo@master (https://github.com/.../tree/master)
+branch: master
+head: 1a2b3c4d5e6f... (2026-09-04T01:00:00Z)
+commits: 128
+changes: branch advanced 9f8e7d6c -> 1a2b3c4d, +2 commits
+```
+
 Each delivery also emits a `pr-watcher/notify` Cordis event with the watch id,
-whether it was the satisfied transition, the change summary, and the delivery
-outcome, so other host plugins can react without parsing the message text.
+the target (`number` or `branch`), whether it was the satisfied transition, the
+change summary, and the delivery outcome, so other host plugins can react
+without parsing the message text.
 
 ## Known limits
 
 - A satisfied watch delivers nothing further (the single edge notification is
   the whole job); to track a later phase, register a second watch.
+- A branch watch has no conditions and never satisfies: it notifies on every
+  observed head change, so a base branch with heavy traffic notifies every
+  poll interval in which it moved.
 - Comment edits and deletions are not detected — only newly added comments
   (identified by stable key) surface.
 - The conversation window keeps the 15 newest comments; if more than 15
@@ -239,20 +277,21 @@ A `gh` call that fails (non-zero exit, GraphQL error, invalid JSON) marks the
 watch's `lastError`, keeps the previous snapshot (so a transient outage never
 looks like a change), and starts an exponential backoff for that watch (30s
 doubling to a 10min ceiling). A conversation-fetch failure keeps the previous
-conversation window without failing the poll. A PR or repository that does not
-exist reports `not found` and keeps the watch in the error state.
+conversation window without failing the poll. A PR, repository, or branch that
+does not exist reports `not found` and keeps the watch in the error state.
 
 ## Development
 
 ```sh
-pnpm install --config.auto-install-peers=false
+pnpm install
 pnpm run check   # typecheck + vitest + build
 ```
 
 Dependencies are the published `@deepseek-ai/dsh-*` alpha packages; the CI
 workflow installs with `--frozen-lockfile`. Tests cover the GraphQL-to-snapshot
-mapping, condition evaluation, change detection, watch registry and
-edge-triggered delivery (against a fake agent registry), and tool forwarding.
+mapping (PR and branch), condition evaluation, change detection, watch registry
+and edge-triggered delivery (against a fake agent registry), and tool
+forwarding.
 
 ## License
 

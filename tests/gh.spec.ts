@@ -1,6 +1,8 @@
 /** gh CLI wiring and GraphQL → PrSnapshot mapping. */
 import { describe, expect, it } from 'vitest'
 import {
+  BRANCH_QUERY,
+  branchSnapshotFromGraphql,
   buildGhArgs,
   conversationCountsChanged,
   conversationFromRest,
@@ -221,6 +223,53 @@ describe('truncation flags', () => {
     const clean = snapshotFromGraphql('example-org/example-repo', 1, fixture())
     expect(clean.checksTruncated).toBe(false)
     expect(clean.threadsTruncated).toBe(false)
+  })
+})
+
+describe('BRANCH_QUERY and branchSnapshotFromGraphql', () => {
+  it('selects the ref head and commit count', () => {
+    for (const field of ['ref(qualifiedName', 'oid', 'committedDate', 'history(first: 1)']) {
+      expect(BRANCH_QUERY).toContain(field)
+    }
+  })
+
+  it('maps a branch head payload', () => {
+    const snapshot = branchSnapshotFromGraphql('example-org/example-repo', 'master', {
+      repository: {
+        ref: {
+          name: 'master',
+          target: { oid: 'd'.repeat(40), committedDate: '2026-09-03T01:00:00Z', history: { totalCount: 42 } },
+        },
+      },
+    })
+    expect(snapshot).toEqual({
+      kind: 'branch',
+      repo: 'example-org/example-repo',
+      branch: 'master',
+      url: 'https://github.com/example-org/example-repo/tree/master',
+      headOid: 'd'.repeat(40),
+      committedDate: '2026-09-03T01:00:00Z',
+      commits: 42,
+    })
+  })
+
+  it('falls back to the requested branch name and zero counts on partial payloads', () => {
+    const snapshot = branchSnapshotFromGraphql('example-org/example-repo', 'release', {
+      repository: { ref: { name: null, target: { oid: 'e'.repeat(40), committedDate: null } } },
+    })
+    expect(snapshot.branch).toBe('release')
+    expect(snapshot.committedDate).toBe('')
+    expect(snapshot.commits).toBe(0)
+  })
+
+  it('throws when the branch or its commit target is missing', () => {
+    expect(() => branchSnapshotFromGraphql('example-org/example-repo', 'ghost', { repository: { ref: null } }))
+      .toThrow(/branch ghost not found/)
+    expect(() => branchSnapshotFromGraphql('example-org/example-repo', 'ghost', {}))
+      .toThrow(/branch ghost not found/)
+    expect(() => branchSnapshotFromGraphql('example-org/example-repo', 'tagged', {
+      repository: { ref: { name: 'tagged', target: null } },
+    })).toThrow(/branch tagged not found/)
   })
 })
 

@@ -9,10 +9,11 @@ import {
   renderChanges,
 } from '../src/pr-watcher/conditions.ts'
 import { hasChanges as hasChangesGuard } from '../src/pr-watcher/types.ts'
-import type { PrSnapshot } from '../src/pr-watcher/types.ts'
+import type { BranchChangeSummary, BranchSnapshot, PrChangeSummary, PrSnapshot } from '../src/pr-watcher/types.ts'
 
 function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
   return {
+    kind: 'pr',
     repo: 'example-org/example-repo',
     number: 1,
     url: 'https://example.invalid/pr/1',
@@ -36,6 +37,33 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
     conversation: [],
     ...overrides,
   }
+}
+
+function branch(overrides: Partial<BranchSnapshot> = {}): BranchSnapshot {
+  return {
+    kind: 'branch',
+    repo: 'example-org/example-repo',
+    branch: 'master',
+    url: 'https://example.invalid/tree/master',
+    headOid: 'c'.repeat(40),
+    committedDate: '2026-09-03T01:00:00Z',
+    commits: 10,
+    ...overrides,
+  }
+}
+
+/** `diffSnapshots` narrowed to the PR branch of the change-summary union. */
+function diffPr(prev: PrSnapshot, next: PrSnapshot): PrChangeSummary {
+  const diff = diffSnapshots(prev, next)
+  if (diff === null || diff.kind !== 'pr') throw new Error('expected a PR change summary')
+  return diff
+}
+
+/** `diffSnapshots` narrowed to the branch branch of the change-summary union. */
+function diffBranch(prev: BranchSnapshot, next: BranchSnapshot): BranchChangeSummary {
+  const diff = diffSnapshots(prev, next)
+  if (diff === null || diff.kind !== 'branch') throw new Error('expected a branch change summary')
+  return diff
 }
 
 describe('evaluateConditions', () => {
@@ -116,7 +144,8 @@ describe('diffSnapshots', () => {
 
   it('reports positive deltas for activity counts', () => {
     const next = snapshot({ commits: 4, reviews: 3, reviewThreads: 2, reviewComments: 5, issueComments: 1 })
-    expect(diffSnapshots(base, next)).toEqual({
+    expect(diffPr(base, next)).toEqual({
+      kind: 'pr',
       headRefOid: null,
       headRefName: null,
       commits: 3,
@@ -133,8 +162,8 @@ describe('diffSnapshots', () => {
 
   it('never reports negative activity deltas', () => {
     const next = snapshot({ commits: 0, reviews: 0 })
-    expect(diffSnapshots(base, next).commits).toBe(0)
-    expect(diffSnapshots(base, next).reviews).toBe(0)
+    expect(diffPr(base, next).commits).toBe(0)
+    expect(diffPr(base, next).reviews).toBe(0)
   })
 
   it('reports signed check-run state deltas and newly failed names', () => {
@@ -143,11 +172,11 @@ describe('diffSnapshots', () => {
       checks: { total: 3, passed: 2, failed: 1, pending: 0 },
       failedChecks: ['lint', 'test'],
     })
-    const diff = diffSnapshots(before, after)
+    const diff = diffPr(before, after)
     expect(diff.checks).toEqual({ passed: 1, failed: 1, pending: -2 })
     expect(diff.newlyFailedChecks).toEqual(['lint', 'test'])
     // A check that was already failing in the previous snapshot is not "newly failed".
-    const stillRed = diffSnapshots(
+    const stillRed = diffPr(
       snapshot({ checks: { total: 2, passed: 0, failed: 1, pending: 1 }, failedChecks: ['lint'] }),
       snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint', 'test'] }),
     )
@@ -155,7 +184,7 @@ describe('diffSnapshots', () => {
   })
 
   it('flags a mergeable transition with its from/to pair', () => {
-    const diff = diffSnapshots(
+    const diff = diffPr(
       snapshot({ mergeable: 'MERGEABLE' }),
       snapshot({ mergeable: 'CONFLICTING' }),
     )
@@ -163,12 +192,12 @@ describe('diffSnapshots', () => {
     expect(hasChanges(diff)).toBe(true)
     expect(renderChanges(diff)).toContain('mergeable: MERGEABLE -> CONFLICTING')
     // UNKNOWN stays a no-op only when it did not change.
-    expect(diffSnapshots(snapshot(), snapshot()).mergeable).toBeNull()
+    expect(diffPr(snapshot(), snapshot()).mergeable).toBeNull()
   })
 
   it('flags a moved head ref', () => {
     const next = snapshot({ headRefOid: 'b'.repeat(40), headRefName: 'feat/y' })
-    const diff = diffSnapshots(base, next)
+    const diff = diffPr(base, next)
     expect(diff.headRefOid).toBe('b'.repeat(40))
     expect(diff.headRefName).toBe('feat/y')
   })
@@ -178,10 +207,10 @@ describe('diffSnapshots', () => {
     const second = { key: 'inline-2', kind: 'inline' as const, author: 'bob', createdAt: '2026-09-03T02:00:00Z', body: 'second', url: 'u2', path: 'src/x.ts' }
     const before = snapshot({ conversation: [first] })
     const after = snapshot({ conversation: [second, first] })
-    const diff = diffSnapshots(before, after)
+    const diff = diffPr(before, after)
     expect(diff.newComments).toEqual([second])
     // Same window twice is no change.
-    expect(diffSnapshots(before, before).newComments).toEqual([])
+    expect(diffPr(before, before).newComments).toEqual([])
   })
 })
 
@@ -192,7 +221,7 @@ describe('hasChanges / renderChanges', () => {
   })
 
   it('counts a check-run state transition as a change', () => {
-    const diff = diffSnapshots(
+    const diff = diffPr(
       snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
       snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] }),
     )
@@ -203,7 +232,7 @@ describe('hasChanges / renderChanges', () => {
   })
 
   it('renders a compact changes line', () => {
-    const diff = diffSnapshots(snapshot(), snapshot({ commits: 4, reviewComments: 2, headRefOid: 'b'.repeat(40) }))
+    const diff = diffPr(snapshot(), snapshot({ commits: 4, reviewComments: 2, headRefOid: 'b'.repeat(40) }))
     expect(hasChanges(diff)).toBe(true)
     const line = renderChanges(diff)
     expect(line).toContain('+3 commits')
@@ -225,6 +254,7 @@ describe('buildNotificationText', () => {
 
   it('names change notifications without the satisfied line', () => {
     const text = buildNotificationText('watch-1', snapshot({ commits: 2 }), false, false, {
+      kind: 'pr',
       headRefOid: null,
       headRefName: null,
       commits: 1,
@@ -259,6 +289,7 @@ describe('buildNotificationText', () => {
       path: 'src/x.ts',
     }
     const change = {
+      kind: 'pr' as const,
       headRefOid: null,
       headRefName: null,
       commits: 0,
@@ -309,5 +340,54 @@ describe('truncation reporting', () => {
   it('adds no truncation notes for untruncated snapshots', () => {
     const text = buildNotificationText('watch-1', snapshot(), false, false, null)
     expect(text).not.toContain('note:')
+  })
+})
+
+describe('branch snapshots', () => {
+  it('diffs a branch advance as oids plus a commit delta', () => {
+    const before = branch()
+    const after = branch({ headOid: 'd'.repeat(40), commits: 13, committedDate: '2026-09-04T01:00:00Z' })
+    expect(diffBranch(before, after)).toEqual({
+      kind: 'branch',
+      fromOid: 'c'.repeat(40),
+      toOid: 'd'.repeat(40),
+      commits: 3,
+      committedDate: '2026-09-04T01:00:00Z',
+    })
+  })
+
+  it('treats an unchanged branch as no change', () => {
+    expect(hasChangesGuard(diffSnapshots(branch(), branch()))).toBe(false)
+    expect(renderChanges(diffBranch(branch(), branch()))).toBe('')
+  })
+
+  it('returns null when the compared targets have different kinds', () => {
+    expect(diffSnapshots(branch(), snapshot())).toBeNull()
+    expect(diffSnapshots(snapshot(), branch())).toBeNull()
+  })
+
+  it('renders an advance and a rewrite', () => {
+    const advanced = diffBranch(branch(), branch({ headOid: 'd'.repeat(40), commits: 11 }))
+    expect(hasChanges(advanced)).toBe(true)
+    expect(renderChanges(advanced)).toBe('changes: branch advanced cccccccc -> dddddddd, +1 commit')
+    const rewritten = diffBranch(branch(), branch({ headOid: 'd'.repeat(40), commits: 8 }))
+    expect(renderChanges(rewritten)).toBe('changes: branch advanced cccccccc -> dddddddd, -2 commits (rewritten)')
+  })
+
+  it('builds a branch notification with the head, commit count, and change line', () => {
+    const change = diffBranch(branch(), branch({ headOid: 'd'.repeat(40), commits: 12 }))
+    const text = buildNotificationText('watch-b', branch({ headOid: 'd'.repeat(40), commits: 12 }), false, false, change)
+    expect(text).toContain('PR watch "watch-b" changed: example-org/example-repo@master (https://example.invalid/tree/master)')
+    expect(text).toContain('branch: master')
+    expect(text).toContain(`head: ${'d'.repeat(40)} (2026-09-03T01:00:00Z)`)
+    expect(text).toContain('commits: 12')
+    expect(text).toContain('changes: branch advanced cccccccc -> dddddddd, +2 commits')
+    expect(text).not.toContain('conditions met')
+  })
+
+  it('omits the changes line on the first poll of a branch watch', () => {
+    const text = buildNotificationText('watch-b', branch({ committedDate: '' }), false, false, null)
+    expect(text).toContain(`head: ${'c'.repeat(40)}`)
+    expect(text).not.toContain('changes:')
   })
 })

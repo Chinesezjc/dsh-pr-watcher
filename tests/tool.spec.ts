@@ -5,10 +5,11 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as toolPrWatcher from '../src/tool-pr-watcher/index.ts'
 import type { PrWatcherService } from '../src/pr-watcher/index.ts'
-import type { PrSnapshot } from '../src/pr-watcher/types.ts'
+import type { BranchSnapshot, PrSnapshot } from '../src/pr-watcher/types.ts'
 
 function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
   return {
+    kind: 'pr',
     repo: 'example-org/example-repo',
     number: 1,
     url: 'https://example.invalid/pr/1',
@@ -34,9 +35,23 @@ function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
   }
 }
 
+function branchSnapshot(overrides: Partial<BranchSnapshot> = {}): BranchSnapshot {
+  return {
+    kind: 'branch',
+    repo: 'example-org/example-repo',
+    branch: 'master',
+    url: 'https://example.invalid/tree/master',
+    headOid: 'c'.repeat(40),
+    committedDate: '2026-09-03T01:00:00Z',
+    commits: 10,
+    ...overrides,
+  }
+}
+
 function fakeService(overrides: Record<string, unknown> = {}): PrWatcherService {
   return {
     check: vi.fn(async () => ({ ok: true, snapshot: snapshot() })),
+    checkBranch: vi.fn(async () => ({ ok: true, snapshot: branchSnapshot() })),
     watch: vi.fn((spec: { id: string }) => ({ ok: true, id: spec.id })),
     unwatch: vi.fn((id: string) => id !== 'ghost'),
     list: vi.fn(() => []),
@@ -190,7 +205,118 @@ describe('tool-pr-watcher', () => {
     const result = await tool.execute({}, { signal: new AbortController().signal } as never)
     expect(result).toEqual({ watches: [] })
     const rendered = tool.output!.render!({}, result as never)
-    expect((rendered as { text: string }[])[0]!.text).toBe('no active PR watches')
+    expect((rendered as { text: string }[])[0]!.text).toBe('no active watches')
+    await dispose()
+  })
+
+  it('pr_status forwards a branch query and renders the branch head', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_status')!
+    const result = await tool.execute(
+      { repo: 'example-org/example-repo', branch: 'master' },
+      { signal: new AbortController().signal } as never,
+    )
+    expect(service.checkBranch).toHaveBeenCalledWith('example-org/example-repo', 'master')
+    expect(service.check).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ ok: true })
+    const rendered = tool.output!.render!(
+      { repo: 'example-org/example-repo', branch: 'master' },
+      { ok: true, snapshot: branchSnapshot() } as never,
+    )
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('example-org/example-repo@master')
+    expect(text).toContain(`head: ${'c'.repeat(40)} (2026-09-03T01:00:00Z)`)
+    expect(text).toContain('commits: 10')
+    await dispose()
+  })
+
+  it('pr_status requires exactly one of number or branch', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_status')!
+    const exec = { signal: new AbortController().signal } as never
+    expect(await tool.execute({ repo: 'example-org/example-repo' }, exec)).toMatchObject({
+      ok: false,
+      reason: 'provide exactly one of number (pull request) or branch',
+    })
+    expect(await tool.execute({ repo: 'example-org/example-repo', number: 1, branch: 'master' }, exec))
+      .toMatchObject({ ok: false, reason: 'provide exactly one of number (pull request) or branch' })
+    expect(service.check).not.toHaveBeenCalled()
+    expect(service.checkBranch).not.toHaveBeenCalled()
+    await dispose()
+  })
+
+  it('pr_watch defaults a branch watch to an empty condition set and the repo@branch id', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch')!
+    const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
+    const result = await tool.execute({ repo: 'example-org/example-repo', branch: 'master' }, exec)
+    expect(service.watch).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'example-org/example-repo@master',
+      repo: 'example-org/example-repo',
+      branch: 'master',
+      conditions: [],
+      notifyChanges: true,
+      target: { sessionId: 'sess-9' },
+    }))
+    expect(result).toMatchObject({ ok: true, id: 'example-org/example-repo@master', branch: 'master' })
+    const rendered = tool.output!.render!(
+      { repo: 'example-org/example-repo', branch: 'master' },
+      result as never,
+    )
+    expect((rendered as { text: string }[])[0]!.text).toContain('conditions: none (notifies on every change)')
+    await dispose()
+  })
+
+  it('pr_watch requires exactly one of number or branch', async () => {
+    const service = fakeService()
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch')!
+    const exec = { agent: { session: { id: 'sess-9' } }, signal: new AbortController().signal } as never
+    expect(await tool.execute({ repo: 'example-org/example-repo' }, exec)).toMatchObject({
+      ok: false,
+      reason: 'provide exactly one of number (pull request) or branch',
+    })
+    expect(await tool.execute({ repo: 'example-org/example-repo', number: 1, branch: 'master' }, exec))
+      .toMatchObject({ ok: false, reason: 'provide exactly one of number (pull request) or branch' })
+    expect(service.watch).not.toHaveBeenCalled()
+    await dispose()
+  })
+
+  it('pr_watch_list renders a branch watch with its advanced head', async () => {
+    const service = fakeService({
+      list: vi.fn(() => [{
+        id: 'example-org/example-repo@master',
+        repo: 'example-org/example-repo',
+        branch: 'master',
+        conditions: [],
+        notifyChanges: true,
+        target: { sessionId: 'sess-1' },
+        satisfied: false,
+        notified: false,
+        snapshot: branchSnapshot(),
+        lastError: undefined,
+        lastPolledAt: '2026-09-04T00:00:00Z',
+      }]),
+    })
+    const { ctx, dispose } = await mounted(service)
+    const tool = ctx.tools.get('pr_watch_list')!
+    const result = await tool.execute({}, { signal: new AbortController().signal } as never) as {
+      watches: Record<string, unknown>[]
+    }
+    expect(result.watches[0]).toMatchObject({
+      id: 'example-org/example-repo@master',
+      branch: 'master',
+      target: 'example-org/example-repo@master',
+      conditions: [],
+    })
+    expect(result.watches[0]!.number).toBeUndefined()
+    const rendered = tool.output!.render!({}, result as never)
+    const text = (rendered as { text: string }[])[0]!.text
+    expect(text).toContain('example-org/example-repo@master: example-org/example-repo@master branch master')
+    expect(text).toContain('head cccccccc of 10 commits')
     await dispose()
   })
 })

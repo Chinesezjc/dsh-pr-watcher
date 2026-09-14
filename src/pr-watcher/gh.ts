@@ -11,7 +11,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { CheckSummary, ConversationEntry, PrSnapshot } from './types.ts'
+import type { BranchSnapshot, CheckSummary, ConversationEntry, PrSnapshot } from './types.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -19,6 +19,24 @@ const execFileAsync = promisify(execFile)
 export const CONVERSATION_LIMIT = 15
 /** Per-comment body truncation bound applied when storing a conversation entry. */
 export const CONVERSATION_BODY_LIMIT = 2000
+
+/** One GraphQL round-trip for a watched branch head. */
+export const BRANCH_QUERY = `
+query ($owner: String!, $name: String!, $qualified: String!) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $qualified) {
+      name
+      target {
+        ... on Commit {
+          oid
+          committedDate
+          history(first: 1) { totalCount }
+        }
+      }
+    }
+  }
+}
+`.trim()
 
 /** One GraphQL round-trip for a PR's full status snapshot. */
 export const PR_QUERY = `
@@ -257,6 +275,7 @@ export function snapshotFromGraphql(repo: string, number: number, data: unknown)
   const contextTotal = numberOr(pullRequest.statusCheckRollup?.contexts?.totalCount, contextNodes.length)
   const { checks, failedChecks } = summarizeChecks(contextNodes)
   return {
+    kind: 'pr' as const,
     repo,
     number,
     url: pullRequest.url ?? '',
@@ -416,4 +435,68 @@ export async function fetchConversation(
     ) as Promise<RestReview[]>,
   ])
   return conversationFromRest(issueComments, reviewComments, reviews)
+}
+
+/** Raw GraphQL shape of one branch ref lookup. */
+interface GraphQlRef {
+  repository?: {
+    ref?: {
+      name?: string | null
+      target?: {
+        oid?: string | null
+        committedDate?: string | null
+        history?: { totalCount?: number } | null
+      } | null
+    } | null
+  } | null
+}
+
+/**
+ * Map a branch-ref GraphQL payload into a `BranchSnapshot`.
+ * @param repo - the `owner/name` the query ran against, echoed into the snapshot.
+ * @param branch - the watched branch name, echoed into the snapshot.
+ * @param data - the GraphQL `data` object.
+ * @returns the branch snapshot.
+ * @throws when the branch does not exist or has no commit target.
+ */
+export function branchSnapshotFromGraphql(repo: string, branch: string, data: unknown): BranchSnapshot {
+  const ref = (data as GraphQlRef)?.repository?.ref
+  const target = ref?.target
+  if (ref === undefined || ref === null || target === undefined || target === null || target.oid === undefined || target.oid === null) {
+    throw new Error(`branch ${branch} not found in ${repo}`)
+  }
+  return {
+    kind: 'branch',
+    repo,
+    branch: ref.name ?? branch,
+    url: `https://github.com/${repo}/tree/${branch}`,
+    headOid: target.oid,
+    committedDate: target.committedDate ?? '',
+    commits: numberOr(target.history?.totalCount, 0),
+  }
+}
+
+/**
+ * Fetch one branch head through the `gh` CLI.
+ * @param ghPath - path or name of the `gh` executable.
+ * @param repo - repository as `owner/name`.
+ * @param branch - branch name, e.g. `master`.
+ * @param timeoutMs - per-call timeout.
+ * @returns the branch snapshot.
+ * @throws on non-zero exit, GraphQL errors, or a missing branch.
+ */
+export async function fetchBranchSnapshot(
+  ghPath: string,
+  repo: string,
+  branch: string,
+  timeoutMs: number,
+): Promise<BranchSnapshot> {
+  const { owner, name } = parseRepo(repo)
+  const data = await ghGraphql(
+    ghPath,
+    BRANCH_QUERY,
+    { owner, name, qualified: `refs/heads/${branch}` },
+    timeoutMs,
+  )
+  return branchSnapshotFromGraphql(repo, branch, data)
 }

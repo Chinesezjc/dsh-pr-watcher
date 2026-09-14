@@ -31,6 +31,7 @@ import {
 } from './conditions.ts'
 import {
   conversationCountsChanged,
+  fetchBranchSnapshot,
   fetchConversation,
   ghGraphql,
   parseRepo,
@@ -41,6 +42,7 @@ import {
   DEFAULT_CONDITIONS,
   hasChanges,
   isConditionName,
+  type BranchSnapshot,
   type ConditionName,
   type ConversationEntry,
   type DeliveryMode,
@@ -49,6 +51,7 @@ import {
   type QueryResult,
   type WatchNotifyInfo,
   type WatchResult,
+  type WatchSnapshot,
   type WatchSpec,
   type WatchStatus,
 } from './types.ts'
@@ -90,7 +93,7 @@ const PLUGIN_SOURCE = 'dsh-pr-watcher'
 /** One registered watch plus its runtime state. */
 interface WatchState {
   readonly spec: WatchSpec
-  snapshot: PrSnapshot | undefined
+  snapshot: WatchSnapshot | undefined
   satisfied: boolean
   notified: boolean
   lastError: string | undefined
@@ -112,14 +115,44 @@ function backoffDelay(failures: number): number {
   return Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (failures - 1))
 }
 
+/**
+ * Validate the exactly-one-of `number`/`branch` target selection shared by the
+ * config schema, the persisted records, and the runtime `watch()` call.
+ * @param number - pull request number, when the watch targets a PR.
+ * @param branch - branch name, when the watch targets a branch head.
+ * @returns the target fields to spread into a watch spec.
+ * @throws when neither or both are provided.
+ */
+function resolveTarget(
+  number: number | undefined,
+  branch: string | undefined,
+): { number: number } | { branch: string } {
+  const hasBranch = branch !== undefined && branch !== ''
+  if ((number !== undefined) === hasBranch) {
+    throw new Error('exactly one of number (pull request) or branch must be provided')
+  }
+  if (number !== undefined && (!Number.isInteger(number) || number < 1)) {
+    throw new Error(`invalid pull request number ${number}`)
+  }
+  return hasBranch ? { branch: branch as string } : { number: number as number }
+}
+
+/** The target fields of one runtime watch, normalized from its spec. */
+function specTarget(spec: WatchSpec): { repo: string; number: number } | { repo: string; branch: string } {
+  return { repo: spec.repo, ...resolveTarget(spec.number, spec.branch) }
+}
+
 const deliverySchema = z.union([z.const('followup'), z.const('steer'), z.const('inject')])
 
 const configWatchSchema = z.object({
   id: z.string(),
   repo: z.string(),
-  number: z.natural(),
+  number: z.natural().required(false),
+  branch: z.string().required(false),
   // Condition names are validated by PrWatcherService.assertConditions at load.
-  conditions: z.array(z.string()).default([...DEFAULT_CONDITIONS]),
+  // A branch watch takes no conditions, so the ready-set default is applied in
+  // the constructor for PR watches only.
+  conditions: z.array(z.string()).required(false),
   // Change notifications are on by default; a static watch that only wants
   // the single satisfied notification sets this false.
   notifyChanges: z.boolean().default(true),
@@ -155,9 +188,12 @@ export interface ConfigWatch {
   readonly id: string
   /** Repository as `owner/name`. */
   readonly repo: string
-  readonly number: number
+  /** Pull request number; exactly one of `number`/`branch` is set. */
+  readonly number?: number
+  /** Watched branch head (e.g. `master`); exactly one of `number`/`branch` is set. */
+  readonly branch?: string
   /** Condition names; validated by {@link PrWatcherService.assertConditions}. */
-  readonly conditions: readonly string[]
+  readonly conditions?: readonly string[]
   readonly notifyChanges: boolean
   /** Target session; empty falls back to `Config.notifySessionId`. */
   readonly sessionId: string
@@ -225,8 +261,21 @@ export class PrWatcherService extends Service {
       }
       seen.add(watch.id)
       parseRepo(watch.repo)
-      const conditions = watch.conditions ?? [...DEFAULT_CONDITIONS]
+      let target: { number: number } | { branch: string }
+      try {
+        target = resolveTarget(watch.number, watch.branch)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(`pr-watcher: watch "${watch.id}" invalid: ${message}`)
+      }
+      const conditions = watch.conditions ?? ('number' in target ? [...DEFAULT_CONDITIONS] : [])
       this.assertConditions(conditions)
+      if ('branch' in target && conditions.length > 0) {
+        throw new Error(`pr-watcher: watch "${watch.id}" is a branch watch; branch watches take no conditions`)
+      }
+      if ('branch' in target && watch.notifyChanges === false) {
+        throw new Error(`pr-watcher: watch "${watch.id}" is a branch watch; branch watches must keep change notifications on`)
+      }
       const ownSessionId = watch.sessionId ?? ''
       const sessionId = ownSessionId !== '' ? ownSessionId : (config.notifySessionId ?? '')
       if (sessionId === '') {
@@ -237,7 +286,7 @@ export class PrWatcherService extends Service {
       this.watches.set(watch.id, this.initialState({
         id: watch.id,
         repo: watch.repo,
-        number: watch.number,
+        ...target,
         conditions,
         notifyChanges: watch.notifyChanges ?? true,
         target: {
@@ -318,25 +367,33 @@ export class PrWatcherService extends Service {
     const id = typeof record.id === 'string' ? record.id : ''
     if (id === '') throw new Error('pr-watcher: persisted watch has no id')
     const repo = typeof record.repo === 'string' ? record.repo : ''
-    const number = typeof record.number === 'number' ? record.number : NaN
+    const number = typeof record.number === 'number' ? record.number : undefined
+    const branch = typeof record.branch === 'string' ? record.branch : undefined
     const targetSessionId = typeof record.target?.sessionId === 'string' ? record.target.sessionId : ''
     const delivery = typeof record.target?.delivery === 'string' ? record.target.delivery as DeliveryMode : undefined
+    let target: { number: number } | { branch: string }
+    let conditions: string[]
     try {
       parseRepo(repo)
-      if (!Number.isInteger(number) || number < 1) throw new Error(`invalid pull request number ${number}`)
+      target = resolveTarget(number, branch)
       if (targetSessionId === '') throw new Error('notification sessionId must not be empty')
-      this.assertConditions(Array.isArray(record.conditions) ? record.conditions : [])
+      conditions = ((record.conditions as string[] | undefined) ?? [])
+      this.assertConditions(conditions)
+      if ('branch' in target && conditions.length > 0) {
+        throw new Error('branch watches take no conditions')
+      }
+      if ('branch' in target && record.notifyChanges !== true) {
+        throw new Error('a branch watch must keep change notifications on')
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       throw new Error(`pr-watcher: persisted watch "${id}" invalid: ${message}`)
     }
-    const conditions = (record.conditions as string[]) ?? []
-    this.assertConditions(conditions)
     return {
       id,
       repo,
-      number,
-      conditions,
+      ...target,
+      conditions: conditions as ConditionName[],
       notifyChanges: record.notifyChanges === true,
       target: {
         sessionId: targetSessionId,
@@ -353,7 +410,7 @@ export class PrWatcherService extends Service {
       watches: [...this.watches.values()].map((state) => ({
         id: state.spec.id,
         repo: state.spec.repo,
-        number: state.spec.number,
+        ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
         conditions: [...state.spec.conditions],
         notifyChanges: state.spec.notifyChanges,
         target: {
@@ -405,6 +462,21 @@ export class PrWatcherService extends Service {
   }
 
   /**
+   * One-shot status query for a branch head, without registering a watch.
+   * @param repo - repository as `owner/name`.
+   * @param branch - branch name, e.g. `master`.
+   * @returns the snapshot, or a structured failure reason.
+   */
+  async checkBranch(repo: string, branch: string): Promise<QueryResult> {
+    try {
+      const snapshot = await this.fetchSnapshot({ repo, branch })
+      return { ok: true, snapshot }
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    * Register a runtime watch (typically from the model-facing `pr_watch` tool).
    * @param spec - the watch to register.
    * @returns the registered id, or a structured failure reason.
@@ -422,8 +494,17 @@ export class PrWatcherService extends Service {
   /** Validate one watch spec, returning a failure reason or undefined. */
   private specFailure(spec: WatchSpec): string | undefined {
     if (spec.target.sessionId === '') return 'notification sessionId must not be empty'
-    if (!Number.isInteger(spec.number) || spec.number < 1) {
-      return `invalid pull request number ${spec.number}`
+    let target: { number: number } | { branch: string }
+    try {
+      target = resolveTarget(spec.number, spec.branch)
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    if ('branch' in target && spec.conditions.length > 0) {
+      return 'branch watches take no conditions; they notify on every head advance'
+    }
+    if ('branch' in target && !spec.notifyChanges) {
+      return 'a branch watch must keep change notifications on; it has no conditions to satisfy'
     }
     try {
       parseRepo(spec.repo)
@@ -454,7 +535,7 @@ export class PrWatcherService extends Service {
     return [...this.watches.values()].map((state) => ({
       id: state.spec.id,
       repo: state.spec.repo,
-      number: state.spec.number,
+      ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
       conditions: state.spec.conditions,
       notifyChanges: state.spec.notifyChanges,
       target: state.spec.target,
@@ -467,21 +548,22 @@ export class PrWatcherService extends Service {
   }
 
   /**
-   * Fetch one PR status snapshot. The GraphQL round-trip carries the counts;
-   * the conversation window is fetched over REST only when no previous
-   * snapshot exists or the conversation counts moved, so quiet polls never
-   * pay for the extra calls. A conversation fetch failure keeps the previous
+   * Fetch one status snapshot. The GraphQL round-trip carries the counts; for
+   * a PR the conversation window is fetched over REST only when no previous
+   * snapshot exists or the conversation counts moved, so quiet polls never pay
+   * for the extra calls. A conversation fetch failure keeps the previous
    * window (or an empty one) instead of failing the poll.
-   * @param spec - the watched PR.
+   * @param spec - the watched PR or branch.
    * @param prev - the previous snapshot, when polling an existing watch.
    */
   protected async fetchSnapshot(
-    spec: { repo: string; number: number },
-    prev?: PrSnapshot,
-  ): Promise<PrSnapshot> {
+    spec: { repo: string; number: number } | { repo: string; branch: string },
+    prev?: WatchSnapshot,
+  ): Promise<WatchSnapshot> {
+    if ('branch' in spec) return this.fetchBranchBase(spec)
     const base = await this.fetchBase(spec)
     let conversation: readonly ConversationEntry[]
-    if (prev !== undefined && !conversationCountsChanged(prev, base)) {
+    if (prev !== undefined && prev.kind === 'pr' && !conversationCountsChanged(prev, base)) {
       conversation = prev.conversation
     } else {
       try {
@@ -490,7 +572,7 @@ export class PrWatcherService extends Service {
         this.ctx.logger.warn(
           `pr-watcher: conversation fetch failed for ${spec.repo}#${spec.number}: ${error instanceof Error ? error.message : String(error)}`,
         )
-        conversation = prev?.conversation ?? []
+        conversation = prev?.kind === 'pr' ? prev.conversation : []
       }
     }
     return { ...base, conversation }
@@ -513,6 +595,11 @@ export class PrWatcherService extends Service {
     return fetchConversation(this.ghPath, spec.repo, spec.number, this.ghTimeoutMs)
   }
 
+  /** GraphQL half of a branch watch's snapshot: the branch head commit. */
+  protected async fetchBranchBase(spec: { repo: string; branch: string }): Promise<BranchSnapshot> {
+    return fetchBranchSnapshot(this.ghPath, spec.repo, spec.branch, this.ghTimeoutMs)
+  }
+
   /** Poll every registered watch once. */
   private async pollAll(): Promise<void> {
     for (const state of this.watches.values()) {
@@ -524,9 +611,9 @@ export class PrWatcherService extends Service {
   private async pollWatch(state: WatchState): Promise<void> {
     if (Date.now() < state.nextAttemptAt) return
     const prev = state.snapshot
-    let snapshot: PrSnapshot
+    let snapshot: WatchSnapshot
     try {
-      snapshot = await this.fetchSnapshot(state.spec, prev)
+      snapshot = await this.fetchSnapshot(specTarget(state.spec), prev)
     } catch (error) {
       state.failures += 1
       state.nextAttemptAt = Date.now() + backoffDelay(state.failures)
@@ -542,8 +629,10 @@ export class PrWatcherService extends Service {
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()
 
-    const result = evaluateConditions(snapshot)
-    const satisfied = conditionsMet(state.spec.conditions, result)
+    // Branch watches carry no conditions, so they only ever produce change
+    // notifications and never a satisfied edge.
+    const satisfied = snapshot.kind === 'pr'
+      && conditionsMet(state.spec.conditions, evaluateConditions(snapshot))
     const satisfiedEdge = satisfied && !state.satisfied
     state.satisfied = satisfied
     if (satisfiedEdge) state.notified = true
@@ -563,7 +652,7 @@ export class PrWatcherService extends Service {
     this.ctx.emit('pr-watcher/notify', {
       id: state.spec.id,
       repo: state.spec.repo,
-      number: state.spec.number,
+      ...(state.spec.number === undefined ? { branch: state.spec.branch } : { number: state.spec.number }),
       satisfied: satisfiedEdge,
       changed: satisfiedEdge ? change : (changed ? change : null),
       delivered: delivered.delivered,

@@ -3,13 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import PrWatcherService from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
+import type { BranchSnapshot, ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 function snapshot(overrides: Partial<PrSnapshot> = {}): PrSnapshot {
   return {
+    kind: 'pr',
     repo: 'example-org/example-repo',
     number: 1,
     url: 'https://example.invalid/pr/1',
@@ -74,6 +75,8 @@ class TestService extends PrWatcherService {
   fetchImpl: ((spec: { repo: string; number: number }) => Promise<PrSnapshot>) | undefined
   /** Feeds the REST conversation half; defaults to an empty window. */
   convImpl: ((spec: { repo: string; number: number }) => Promise<ConversationEntry[]>) | undefined
+  /** Feeds the branch half of fetchSnapshot for branch watches. */
+  branchImpl: ((spec: { repo: string; branch: string }) => Promise<BranchSnapshot>) | undefined
   convCalls = 0
 
   protected override async fetchBase(spec: { repo: string; number: number }): Promise<PrSnapshot> {
@@ -85,6 +88,11 @@ class TestService extends PrWatcherService {
     this.convCalls += 1
     if (this.convImpl === undefined) return []
     return this.convImpl(spec)
+  }
+
+  protected override async fetchBranchBase(spec: { repo: string; branch: string }): Promise<BranchSnapshot> {
+    if (this.branchImpl === undefined) throw new Error('no branchImpl configured')
+    return this.branchImpl(spec)
   }
 }
 
@@ -461,7 +469,7 @@ describe('one-shot check', () => {
     service.fetchImpl = async () => snapshot()
     const ok = await service.check('example-org/example-repo', 1)
     expect(ok.ok).toBe(true)
-    if (ok.ok) expect(ok.snapshot.state).toBe('OPEN')
+    if (ok.ok && ok.snapshot.kind === 'pr') expect(ok.snapshot.state).toBe('OPEN')
     service.fetchImpl = async () => { throw new Error('boom') }
     const bad = await service.check('example-org/example-repo', 1)
     expect(bad).toEqual({ ok: false, reason: 'boom' })
@@ -591,5 +599,209 @@ describe('notifyChanges default', () => {
     })
     expect(service.list()[0]!.notifyChanges).toBe(true)
     await dispose()
+  })
+})
+
+function branch(overrides: Partial<BranchSnapshot> = {}): BranchSnapshot {
+  return {
+    kind: 'branch',
+    repo: 'example-org/example-repo',
+    branch: 'master',
+    url: 'https://example.invalid/tree/master',
+    headOid: 'c'.repeat(40),
+    committedDate: '2026-09-03T01:00:00Z',
+    commits: 10,
+    ...overrides,
+  }
+}
+
+const BRANCH_WATCH = {
+  id: 'example-org/example-repo@master',
+  repo: 'example-org/example-repo',
+  branch: 'master',
+  conditions: [] as const,
+  notifyChanges: true,
+  target: { sessionId: 'sess-1' },
+}
+
+describe('branch watches', () => {
+  it('registers, lists, and removes a branch watch', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    expect(service.watch(BRANCH_WATCH)).toEqual({ ok: true, id: 'example-org/example-repo@master' })
+    const status = service.list()[0]!
+    expect(status).toMatchObject({ branch: 'master', repo: 'example-org/example-repo', satisfied: false })
+    expect(status.number).toBeUndefined()
+    expect(status.conditions).toEqual([])
+    await dispose()
+  })
+
+  it('rejects a branch watch with conditions, and a watch with neither or both targets', async () => {
+    const { service, dispose } = await mounted()
+    expect(service.watch({ ...BRANCH_WATCH, id: 'b1', conditions: ['merged'] })).toEqual({
+      ok: false,
+      reason: 'branch watches take no conditions; they notify on every head advance',
+    })
+    const neither = service.watch({ ...BRANCH_WATCH, id: 'b2', branch: undefined })
+    expect(neither.ok).toBe(false)
+    expect(neither).toMatchObject({ reason: 'exactly one of number (pull request) or branch must be provided' })
+    const both = service.watch({ ...BRANCH_WATCH, id: 'b3', number: 1 })
+    expect(both.ok).toBe(false)
+    expect(both).toMatchObject({ reason: 'exactly one of number (pull request) or branch must be provided' })
+    // An empty branch string is the same as no branch at all.
+    const empty = service.watch({ ...BRANCH_WATCH, id: 'b4', branch: '' })
+    expect(empty.ok).toBe(false)
+    await dispose()
+  })
+
+  it('notifies when the branch head advances and stays silent when it does not', async () => {
+    const { service, delivered, notifications, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch(BRANCH_WATCH)
+    const seq = [
+      branch({ commits: 10 }),
+      branch({ headOid: 'd'.repeat(40), commits: 12, committedDate: '2026-09-04T01:00:00Z' }),
+      branch({ headOid: 'd'.repeat(40), commits: 12, committedDate: '2026-09-04T01:00:00Z' }),
+    ]
+    let i = 0
+    service.branchImpl = async () => seq[i++] ?? seq[2]!
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    // The first poll only establishes the baseline.
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    const text = delivered.get('sess-1')![0]!
+    expect(text).toContain('PR watch "example-org/example-repo@master" changed')
+    expect(text).toContain('branch: master')
+    expect(text).toContain('commits: 12')
+    expect(text).toContain('changes: branch advanced cccccccc -> dddddddd, +2 commits')
+    expect(text).not.toContain('conditions met')
+    expect(notifications[0]).toMatchObject({ branch: 'master', satisfied: false, delivered: true })
+    expect(notifications[0]!.number).toBeUndefined()
+    // An unchanged head produces no further notification.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(service.list()[0]!.satisfied).toBe(false)
+    await dispose()
+  })
+
+  it('rejects a branch watch with change notifications disabled', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    expect(service.watch({ ...BRANCH_WATCH, id: 'quiet', notifyChanges: false })).toEqual({
+      ok: false,
+      reason: 'a branch watch must keep change notifications on; it has no conditions to satisfy',
+    })
+    const seq = [branch(), branch({ headOid: 'd'.repeat(40), commits: 11 })]
+    let i = 0
+    service.branchImpl = async () => seq[i++] ?? seq[1]!
+    service.watch(BRANCH_WATCH)
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    await dispose()
+  })
+
+  it('surfaces a branch fetch failure through the backoff path', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch(BRANCH_WATCH)
+    let calls = 0
+    service.branchImpl = async () => {
+      calls += 1
+      throw new Error('branch not found in example-org/example-repo')
+    }
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    expect(service.list()[0]!.lastError).toContain('branch not found')
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(calls).toBe(1)
+    await dispose()
+  })
+
+  it('mounts a config-declared branch watch with no conditions', async () => {
+    const { service, dispose } = await mounted({
+      watches: [{ id: 'cfg-branch', repo: 'example-org/example-repo', branch: 'master', sessionId: 'sess-1' }],
+    })
+    expect(service.list()[0]).toMatchObject({ id: 'cfg-branch', branch: 'master', conditions: [] })
+    await dispose()
+  })
+
+  it('rejects a config watch with both targets and a config branch watch with conditions', async () => {
+    const both = new Context()
+    both.provide('agents', fakeAgents() as never)
+    await expectPluginThrows(both, {
+      watches: [{ id: 'both', repo: 'example-org/example-repo', number: 1, branch: 'master', sessionId: 'sess-1' }],
+    }, /exactly one of number \(pull request\) or branch must be provided/)
+    const conditioned = new Context()
+    conditioned.provide('agents', fakeAgents() as never)
+    await expectPluginThrows(conditioned, {
+      watches: [{
+        id: 'cfg-branch',
+        repo: 'example-org/example-repo',
+        branch: 'master',
+        sessionId: 'sess-1',
+        conditions: ['mergeable'],
+      }],
+    }, /branch watches take no conditions/)
+    const quiet = new Context()
+    quiet.provide('agents', fakeAgents() as never)
+    await expectPluginThrows(quiet, {
+      watches: [{
+        id: 'cfg-branch',
+        repo: 'example-org/example-repo',
+        branch: 'master',
+        sessionId: 'sess-1',
+        notifyChanges: false,
+      }],
+    }, /branch watches must keep change notifications on/)
+  })
+
+  it('returns the branch snapshot from checkBranch and the reason on failure', async () => {
+    const { service, dispose } = await mounted()
+    service.branchImpl = async () => branch()
+    const ok = await service.checkBranch('example-org/example-repo', 'master')
+    expect(ok.ok).toBe(true)
+    if (ok.ok && ok.snapshot.kind === 'branch') expect(ok.snapshot.commits).toBe(10)
+    service.branchImpl = async () => { throw new Error('boom') }
+    expect(await service.checkBranch('example-org/example-repo', 'master')).toEqual({ ok: false, reason: 'boom' })
+    await dispose()
+  })
+
+  it('persists a branch watch and restores it on restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prw-branch-'))
+    const file = join(dir, 'state.json')
+    try {
+      const first = await mounted({ stateFile: file })
+      expect(first.service.watch(BRANCH_WATCH).ok).toBe(true)
+      await first.dispose()
+      const record = JSON.parse(readFileSync(file, 'utf8')).watches[0]
+      expect(record).toMatchObject({ id: BRANCH_WATCH.id, branch: 'master' })
+      expect(record.number).toBeUndefined()
+
+      const second = await mounted({ stateFile: file })
+      expect(second.service.list()[0]).toMatchObject({ id: BRANCH_WATCH.id, branch: 'master' })
+      await second.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a persisted branch watch that carries conditions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prw-branch-bad-'))
+    const file = join(dir, 'state.json')
+    try {
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        watches: [{
+          id: 'bad-branch',
+          repo: 'example-org/example-repo',
+          branch: 'master',
+          conditions: ['merged'],
+          target: { sessionId: 'sess-1' },
+        }],
+      }))
+      const ctx = new Context()
+      ctx.provide('agents', fakeAgents() as never)
+      await expectPluginThrows(ctx, { stateFile: file }, /branch watches take no conditions/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

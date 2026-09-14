@@ -2,29 +2,35 @@
 
 Use the `dsh-pr-watcher` tools whenever you need to know whether a GitHub pull
 request reached a given state — CI checks settled green, review threads
-resolved, mergeable, approved, merged, or closed. The host service polls PRs
-through the `gh` CLI on a fixed interval and delivers ONE notification to your
-session when the conditions flip to satisfied, so you do not need to poll
+resolved, mergeable, approved, merged, or closed — or when a branch head (for
+example `master`) advances. The host service polls the watched targets through
+the `gh` CLI on a fixed interval and delivers notifications to your session:
+ONE notification when a watch's conditions flip to satisfied, and — by default
+— a notification for every observed change. You do not need to poll
 `gh pr view` / `gh pr checks` in a loop.
 
 ## Tools
 
-- `pr_status` — one-shot status of a pull request. Pass `repo` (`owner/name`)
-  and `number`. Returns the CI check counts (failed/pending/total), unresolved
-  review threads, mergeable state, review decision, head ref, activity counts,
-  and the recent conversation: issue comments, review summaries, and inline
-  review comments with author, time, and body (newest first). Read-only;
-  registers nothing. Use this when you just want a single snapshot, not a
-  watch.
-- `pr_watch` — register a watch on a pull request. Notifications go to THIS
-  session. Pass `repo` and `number`; optionally `id` (default
-  `owner/name#number`), `conditions`, `notifyChanges` (default true — change
-  notifications, including comments with content, are on unless you pass
-  false), and `delivery`. The first poll happens within one poll interval
-  (default 60s).
-- `pr_watch_list` — list active watches: target PR, selected conditions,
-  whether satisfied, whether already notified, last snapshot summary or fetch
-  error, last poll time. Check this instead of re-querying the PR yourself.
+- `pr_status` — one-shot status of a pull request or a branch head. Pass `repo`
+  (`owner/name`) and exactly one of `number` (pull request) or `branch`. For a
+  PR it returns the CI check counts (failed/pending/total), unresolved review
+  threads, mergeable state, review decision, head ref, activity counts, and the
+  recent conversation: issue comments, review summaries, and inline review
+  comments with author, time, and body (newest first). For a branch it returns
+  the head commit oid, its commit date, and the branch's commit count.
+  Read-only; registers nothing. Use this when you just want a single snapshot,
+  not a watch.
+- `pr_watch` — register a watch on a pull request or a branch head.
+  Notifications go to THIS session. Pass `repo` and exactly one of `number` or
+  `branch`; optionally `id` (default `owner/name#number` for a PR watch and
+  `owner/name@branch` for a branch watch), `conditions`, `notifyChanges`
+  (default true — change notifications, including comments with content, are on
+  unless you pass false), and `delivery`. The first poll happens within one
+  poll interval (default 60s).
+- `pr_watch_list` — list active watches: target (PR or branch), selected
+  conditions, whether satisfied, whether already notified, last snapshot
+  summary or fetch error, last poll time. Check this instead of re-querying the
+  target yourself.
 - `pr_watch_remove` — stop a runtime-registered watch by `id`. Static watches
   from the plugin config are not removable through this tool.
 
@@ -71,6 +77,29 @@ conditions and observes changes sends ONE combined message.
 
 Pass `notifyChanges: false` for a pure ready-condition watch that only fires
 the single satisfied notification and ignores everything else until then.
+
+## Branch watches
+
+`pr_watch(repo=..., branch="master")` watches a branch head instead of a pull
+request. The conditions table does not apply: a branch watch takes NO
+conditions (`conditions` must be omitted or empty) and never satisfies — it is
+a pure change watch that notifies every time the head commit moves, with the
+new oid, its commit date, and the commit-count delta:
+
+```
+PR watch "example-org/example-repo@master" changed: example-org/example-repo@master (https://.../tree/master)
+branch: master
+head: 1a2b3c4d... (2026-09-04T01:00:00Z)
+commits: 128
+changes: branch advanced 9f8e7d6c -> 1a2b3c4d, +2 commits
+```
+
+Use a branch watch to notice that a base branch moved under you — a
+merge-forward into `master`, or a stack member's base advancing — instead of
+polling `git fetch` / `gh api` in a loop. A branch watch is silent until the
+head actually changes, so registering one is cheap. `notifyChanges: false` is
+rejected on a branch watch: with no conditions to satisfy it would be a watch
+that can never notify.
 
 ## Delivery
 
