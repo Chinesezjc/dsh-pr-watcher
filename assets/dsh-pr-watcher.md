@@ -46,11 +46,19 @@ not-satisfied to satisfied, then never again for that watch.
 | `checksPassed` | no failed and no pending checks (fully settled; a PR with no checks satisfies vacuously) |
 | `checksFailed` | at least one check failed (CI is red) |
 | `threadsResolved` | no unresolved review threads |
-| `mergeable` | GitHub reports `MERGEABLE` |
+| `mergeable` | GitHub reports `MERGEABLE` (see the note on `UNKNOWN` below) |
 | `conflicted` | GitHub reports `CONFLICTING` (the PR needs a merge-forward against its base) |
 | `reviewApproved` | review decision is `APPROVED` |
 | `merged` | PR state is `MERGED` |
 | `closed` | PR state is `CLOSED` |
+
+GitHub computes a pull request's mergeability asynchronously. While that
+computation is queued the API answers `UNKNOWN` (or nothing), which is the
+absence of an answer rather than a state: the watchdog keeps the last definite
+`MERGEABLE`/`CONFLICTING` value, so a queued recompute neither notifies as a
+change nor flips `mergeable`/`conflicted`. A `MERGEABLE -> UNKNOWN` line in an
+old notification is that transient; re-read the authoritative value with
+`pr_status` or `gh pr view <n> --json mergeable` and take no action on it.
 
 The default selection is the "ready" set: `checksPassed`, `threadsResolved`,
 `mergeable`, `reviewApproved`. `merged`+`closed`, `checksPassed`+`checksFailed`,

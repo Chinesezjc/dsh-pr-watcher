@@ -137,6 +137,24 @@ export function isRateLimitMessage(message: string): boolean {
 }
 
 /**
+ * Replace an indefinite `mergeable` with the last definite value. GitHub
+ * computes a pull request's mergeability asynchronously and answers `UNKNOWN`
+ * (or null) while that computation is queued; that is the absence of an answer,
+ * not a state, so it must not read as a change, must not flip the
+ * `mergeable`/`conflicted` conditions, and must not make a satisfied watch fire
+ * again. Every other field is passed through unchanged.
+ * @param next - the snapshot just fetched.
+ * @param prev - the previous stored snapshot, when the watch has one.
+ * @returns the snapshot with a definite `mergeable`.
+ */
+export function carryForwardMergeable(next: WatchSnapshot, prev: WatchSnapshot | undefined): WatchSnapshot {
+  if (next.kind !== 'pr') return next
+  if (next.mergeable === 'MERGEABLE' || next.mergeable === 'CONFLICTING') return next
+  if (prev === undefined || prev.kind !== 'pr') return next
+  return { ...next, mergeable: prev.mergeable }
+}
+
+/**
  * Validate the exactly-one-of `number`/`branch` target selection shared by the
  * config schema, the persisted records, and the runtime `watch()` call.
  * @param number - pull request number, when the watch targets a PR.
@@ -776,6 +794,7 @@ export class PrWatcherService extends Service {
     state.nextAttemptAt = 0
     this.throttleReports = 0
     this.throttleUntil = 0
+    snapshot = carryForwardMergeable(snapshot, prev)
     state.snapshot = snapshot
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()
@@ -784,7 +803,11 @@ export class PrWatcherService extends Service {
     // notifications and never a satisfied edge.
     const satisfied = snapshot.kind === 'pr'
       && conditionsMet(state.spec.conditions, evaluateConditions(snapshot))
-    const satisfiedEdge = satisfied && !state.satisfied
+    // The satisfied notification is a one-shot: a watch that already delivered
+    // it stays silent even if a condition later falls out of hold and returns
+    // (a check rerun, a queued mergeability recompute), which would otherwise
+    // deliver the same "conditions met" message again.
+    const satisfiedEdge = satisfied && !state.satisfied && !state.notified
     state.satisfied = satisfied
     if (satisfiedEdge) state.notified = true
 

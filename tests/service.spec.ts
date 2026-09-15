@@ -1,7 +1,7 @@
 /** Host service: config validation, watch registry, poll transitions, delivery. */
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import PrWatcherService, { isRateLimitMessage } from '../src/pr-watcher/index.ts'
+import PrWatcherService, { carryForwardMergeable, isRateLimitMessage } from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { BranchSnapshot, ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -1053,6 +1053,79 @@ describe('rate-limit handling', () => {
     service.watch({ ...WATCH, id: 'b' })
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(service.paceCalls).toBe(1)
+    await dispose()
+  })
+})
+
+describe('transient mergeability (UNKNOWN)', () => {
+  it('keeps the last definite mergeable and ignores an indefinite answer', () => {
+    const pr = snapshot({ mergeable: 'MERGEABLE' })
+    expect((carryForwardMergeable(snapshot({ mergeable: 'UNKNOWN' }), pr) as PrSnapshot).mergeable).toBe('MERGEABLE')
+    expect((carryForwardMergeable(snapshot({ mergeable: null }), pr) as PrSnapshot).mergeable).toBe('MERGEABLE')
+    // A definite answer always wins, including the transition to CONFLICTING.
+    expect((carryForwardMergeable(snapshot({ mergeable: 'CONFLICTING' }), pr) as PrSnapshot).mergeable).toBe('CONFLICTING')
+    expect((carryForwardMergeable(snapshot({ mergeable: 'UNKNOWN' }), snapshot({ mergeable: 'CONFLICTING' })) as PrSnapshot).mergeable)
+      .toBe('CONFLICTING')
+    // Without a previous definite value there is nothing to carry.
+    expect((carryForwardMergeable(snapshot({ mergeable: 'UNKNOWN' }), undefined) as PrSnapshot).mergeable).toBe('UNKNOWN')
+    expect((carryForwardMergeable(snapshot({ mergeable: 'UNKNOWN' }), snapshot({ mergeable: null })) as PrSnapshot).mergeable).toBeNull()
+    // Branch snapshots have no mergeable field to carry.
+    expect(carryForwardMergeable(branch(), pr)).toEqual(branch())
+  })
+
+  it('does not notify when mergeability goes indefinite', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'transient', conditions: ['merged'], notifyChanges: true })
+    const seq = [snapshot({ commits: 1 }), snapshot({ commits: 1, mergeable: 'UNKNOWN' }), snapshot({ commits: 1 })]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    // Returning to the same definite value is not a change either.
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    const stored = service.list()[0]!.snapshot
+    expect(stored?.kind === 'pr' ? stored.mergeable : undefined).toBe('MERGEABLE')
+    await dispose()
+  })
+
+  it('still notifies a real mergeable state change', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'real', conditions: ['merged'], notifyChanges: true })
+    const seq = [
+      snapshot({ commits: 1 }),
+      snapshot({ commits: 1, mergeable: 'UNKNOWN' }),
+      snapshot({ commits: 1, mergeable: 'CONFLICTING' }),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toBeUndefined()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    expect(delivered.get('sess-1')![0]).toContain('mergeable: MERGEABLE -> CONFLICTING')
+    await dispose()
+  })
+
+  it('does not deliver the satisfied notification twice after a condition flaps', async () => {
+    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'flapping-ci', notifyChanges: true })
+    const seq = [
+      snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
+      snapshot(),
+      snapshot({ checks: { total: 2, passed: 1, failed: 1, pending: 0 }, failedChecks: ['lint'] }),
+      snapshot(),
+    ]
+    let i = 0
+    service.fetchImpl = async () => seq[i++] ?? snapshot()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    await (service as unknown as { pollAll(): Promise<void> }).pollAll()
+    expect(delivered.get('sess-1')).toHaveLength(1)
     await dispose()
   })
 })

@@ -42,6 +42,11 @@ name is baked into this plugin.
   flip from not-satisfied to satisfied, then never again for that watch.
   Branch watches have no conditions: they are pure change watches that notify
   every time the head commit moves.
+- Mergeability is computed by GitHub asynchronously. While that computation is
+  queued the API answers `UNKNOWN` (or nothing), which is the absence of an
+  answer, not a state: the watchdog keeps the last definite
+  `MERGEABLE`/`CONFLICTING` value, so a queued recompute never reads as a
+  change and never flips the `mergeable`/`conflicted` conditions.
 - Change notifications are ON by default: every watch delivers a notification
   whenever a poll observes new commits, new reviews, new review threads, new
   review comments, new issue comments, a check-run state transition
@@ -297,7 +302,12 @@ without parsing the message text.
 ## Known limits
 
 - A satisfied watch delivers nothing further (the single edge notification is
-  the whole job); to track a later phase, register a second watch.
+  the whole job); to track a later phase, register a second watch. A condition
+  that falls out of hold and returns (a check rerun) does not re-deliver it.
+- `mergeable` reports the last definite state. A pull request whose
+  mergeability GitHub cannot compute stays at its last known value instead of
+  reporting `UNKNOWN`; `pr_status` (a one-shot query with no history to carry
+  from) reports whatever the API answered at that moment.
 - A branch watch has no conditions and never satisfies: it notifies on every
   observed head change, so a base branch with heavy traffic notifies every
   poll interval in which it moved.

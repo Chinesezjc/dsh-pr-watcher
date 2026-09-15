@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.14.0
+
+- An indefinite mergeability is no longer a state: GitHub computes a pull
+  request's mergeability asynchronously and answers `UNKNOWN` (or nothing)
+  while that runs, which used to arrive as a `mergeable: MERGEABLE -> UNKNOWN`
+  change notification, flip the `mergeable`/`conflicted` conditions, and make a
+  satisfied watch fire its one-shot notification a second time. The watch now
+  keeps the last definite `MERGEABLE`/`CONFLICTING` value, so a queued
+  recompute is silent and conditions do not flap. Real
+  `MERGEABLE`/`CONFLICTING` transitions notify exactly as before.
+- The satisfied notification is one-shot by construction: a watch that already
+  delivered it stays silent even when a condition falls out of hold and
+  returns (a check rerun, a queued recompute), instead of delivering the same
+  "conditions met" message again.
+
 ## 0.13.0
 
 - Survive GitHub rate limits instead of hammering through them: watches are
