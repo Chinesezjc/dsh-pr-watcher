@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.15.0
+## 0.15.1
 
 - Watches naming the same pull request or branch head share one fetch per
   cycle. The snapshot belongs to the target, not to the watch, so N watches on
@@ -20,6 +20,9 @@
   silences notifications for half an hour.
 - `pr_watch_list` renders each watch's last poll time, so a cycle that stopped
   running is visible in the listing instead of only as absent notifications.
+
+## 0.15.0
+
 - Delivered notifications carry a producer-owned message source. The source
   used to be the released `{ kind: 'plugin', plugin: 'dsh-pr-watcher' }`
   wrapper, which session format v4 refuses at admission, so a notification was
