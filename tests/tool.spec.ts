@@ -353,6 +353,7 @@ describe('tool-pr-watcher', () => {
     const text = (rendered as { text: string }[])[0]!.text
     expect(text).toContain('example-org/example-repo@master: example-org/example-repo@master branch master')
     expect(text).toContain('head cccccccc of 10 commits')
+    expect(text).toContain('last polled 2026-09-04T00:00:00Z')
     await dispose()
   })
 })

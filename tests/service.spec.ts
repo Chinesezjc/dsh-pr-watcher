@@ -1,7 +1,11 @@
 /** Host service: config validation, watch registry, poll transitions, delivery. */
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import PrWatcherService, { carryForwardMergeable, isRateLimitMessage } from '../src/pr-watcher/index.ts'
+import PrWatcherService, {
+  carryForwardMergeable,
+  isRateLimitMessage,
+  isSecondaryRateLimitMessage,
+} from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { BranchSnapshot, ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
@@ -171,6 +175,16 @@ const WATCH = {
   conditions: ['checksPassed'] as const,
   notifyChanges: false,
   target: { sessionId: 'sess-1' },
+}
+
+/** Run one poll cycle: the loop is private and tests drive it directly. */
+function pollAll(service: TestService): Promise<void> {
+  return (service as unknown as { pollAll(): Promise<void> }).pollAll()
+}
+
+/** Read the interval the poll loop would schedule next, private in the service. */
+function effectiveInterval(service: TestService): number {
+  return (service as unknown as { effectiveIntervalMs(): number }).effectiveIntervalMs()
 }
 
 describe('config watch validation', () => {
@@ -1000,18 +1014,18 @@ describe('rate-limit handling', () => {
     const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
     service.clock = 1_000_000
     service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
-    service.watch({ ...WATCH, id: 'b', conditions: ['merged'] })
+    service.watch({ ...WATCH, id: 'b', number: 2, conditions: ['merged'] })
     let calls = 0
     service.fetchImpl = async () => {
       calls += 1
       throw new Error(RATE_LIMIT)
     }
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
-    // The cycle stops at the first throttled watch instead of spending the rest.
+    // The cycle stops at the first throttled target instead of spending the rest.
     expect(calls).toBe(1)
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(calls).toBe(1)
-    // Past the 120s pause and the 30s per-watch backoff: both watches poll again.
+    // Past the 120s pause and the 30s per-watch backoff: both targets poll again.
     service.clock = 1_000_000 + 121_000
     service.fetchImpl = async () => { calls += 1; return snapshot() }
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
@@ -1069,9 +1083,148 @@ describe('rate-limit handling', () => {
     service.fetchImpl = async () => snapshot()
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(service.paceCalls).toBe(0)
-    service.watch({ ...WATCH, id: 'b' })
+    // Two watches on one target share a request, so pacing counts targets.
+    service.watch({ ...WATCH, id: 'b', number: 2 })
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(service.paceCalls).toBe(1)
+    await dispose()
+  })
+})
+
+describe('shared target fetches', () => {
+  it('fetches one target once for every watch on it', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    service.watch({ ...WATCH, id: 'b', conditions: ['merged'] })
+    service.watch({ ...WATCH, id: 'c', number: 2, conditions: ['merged'] })
+    let calls = 0
+    service.fetchImpl = async () => { calls += 1; return snapshot() }
+    await pollAll(service)
+    // Two watches on #1 share one request; #2 is a second target.
+    expect(calls).toBe(2)
+    expect(service.list().every((watch) => watch.snapshot !== undefined)).toBe(true)
+    await dispose()
+  })
+
+  it('marks every watch on a failing target with the failure', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    service.watch({ ...WATCH, id: 'b', conditions: ['merged'] })
+    service.fetchImpl = async () => { throw new Error('boom') }
+    await pollAll(service)
+    for (const watch of service.list()) {
+      expect(watch.lastError).toBe('boom')
+      expect(watch.lastPolledAt).toBeDefined()
+    }
+    await dispose()
+  })
+
+  it('does not reuse another watch window for a member without a snapshot', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    service.fetchImpl = async () => snapshot()
+    await pollAll(service)
+    const afterFirst = service.convCalls
+    expect(afterFirst).toBe(1)
+    service.watch({ ...WATCH, id: 'b', conditions: ['merged'] })
+    await pollAll(service)
+    expect(service.convCalls).toBe(afterFirst + 1)
+    // Both snapshots now agree on the conversation counts, so the next cycle
+    // reuses the stored window instead of paying for the REST calls again.
+    await pollAll(service)
+    expect(service.convCalls).toBe(afterFirst + 1)
+    await dispose()
+  })
+})
+
+describe('point-budget pacing', () => {
+  it('stretches the interval when the targets exceed the budget', async () => {
+    const { service, dispose } = await mounted(
+      { pollIntervalMs: 30000, maxPointsPerHour: 120 },
+      { liveIds: ['sess-1'] },
+    )
+    for (let index = 0; index < 3; index += 1) {
+      service.watch({ ...WATCH, id: `w${index}`, number: index + 1, conditions: ['merged'] })
+    }
+    // Three targets cost three points per cycle, so 120 points per hour allows
+    // one cycle per 90s, above the 30s floor.
+    expect(effectiveInterval(service)).toBe(90_000)
+    await dispose()
+  })
+
+  it('keeps pollIntervalMs as the floor at the default budget', async () => {
+    const { service, dispose } = await mounted(
+      { pollIntervalMs: 60000, maxPointsPerHour: 2400 },
+      { liveIds: ['sess-1'] },
+    )
+    for (let index = 0; index < 40; index += 1) {
+      service.watch({ ...WATCH, id: `w${index}`, number: index + 1, conditions: ['merged'] })
+    }
+    // 40 targets at the default budget is exactly one cycle per 60s.
+    expect(effectiveInterval(service)).toBe(60_000)
+    await dispose()
+  })
+
+  it('leaves the interval alone when the budget is disabled', async () => {
+    const { service, dispose } = await mounted(
+      { pollIntervalMs: 30000, maxPointsPerHour: 0 },
+      { liveIds: ['sess-1'] },
+    )
+    for (let index = 0; index < 20; index += 1) {
+      service.watch({ ...WATCH, id: `w${index}`, number: index + 1, conditions: ['merged'] })
+    }
+    expect(effectiveInterval(service)).toBe(30_000)
+    await dispose()
+  })
+})
+
+describe('rate-limit pause schedules', () => {
+  const SECONDARY = 'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.'
+
+  it('classifies the secondary limit apart from an exhausted budget', () => {
+    expect(isSecondaryRateLimitMessage(SECONDARY)).toBe(true)
+    expect(isSecondaryRateLimitMessage('You have exceeded a secondary rate limit')).toBe(true)
+    expect(isSecondaryRateLimitMessage('gh: API rate limit already exceeded for user ID 75373981.')).toBe(false)
+    expect(isSecondaryRateLimitMessage('pull request not found')).toBe(false)
+  })
+
+  it('pauses a secondary limit for minutes, not for the point-budget schedule', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.clock = 1_000_000
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    let calls = 0
+    service.fetchImpl = async () => { calls += 1; throw new Error(SECONDARY) }
+    await pollAll(service)
+    expect(calls).toBe(1)
+    // 61s later the secondary pause and the 30s backoff are both over, while
+    // the point-budget schedule would still hold the service for 120s.
+    service.clock = 1_000_000 + 61_000
+    service.fetchImpl = async () => { calls += 1; return snapshot() }
+    await pollAll(service)
+    expect(calls).toBe(2)
+    await dispose()
+  })
+
+  it('caps the secondary pause at five minutes', async () => {
+    const { service, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    service.clock = 1_000_000
+    service.watch({ ...WATCH, id: 'a', conditions: ['merged'] })
+    let calls = 0
+    service.fetchImpl = async () => { calls += 1; throw new Error(SECONDARY) }
+    // Four consecutive reports escalate 60s, 120s, 240s, then hit the ceiling.
+    for (const pause of [60_000, 120_000, 240_000]) {
+      await pollAll(service)
+      service.clock += pause
+    }
+    await pollAll(service)
+    const reportedAt = service.clock
+    service.fetchImpl = async () => { calls += 1; return snapshot() }
+    service.clock = reportedAt + 299_000
+    await pollAll(service)
+    expect(calls).toBe(4)
+    service.clock = reportedAt + 300_000
+    await pollAll(service)
+    expect(calls).toBe(5)
     await dispose()
   })
 })

@@ -2,6 +2,24 @@
 
 ## 0.15.0
 
+- Watches naming the same pull request or branch head share one fetch per
+  cycle. The snapshot belongs to the target, not to the watch, so N watches on
+  one PR no longer cost N GitHub requests; a repeated target is one query, and
+  the 250ms pacing gap counts targets rather than watches.
+- `maxPointsPerHour` (default 2400) caps this service's share of the
+  account-wide GraphQL budget. The budget is 5000 points per hour and is shared
+  with every other client using the same `gh` account, so a large watch set
+  could spend it alone and stall every watch once it was gone; when the watched
+  targets would exceed the configured ceiling, the effective poll interval
+  stretches past `pollIntervalMs`. 0 disables the ceiling.
+- The service-wide pause after a rate limit now follows what GitHub reported. A
+  secondary (abuse-detection) limit clears in minutes, so it pauses 60s doubling
+  to a 5min ceiling; an exhausted point budget refills on an hourly window, so
+  it keeps the 120s-to-30min schedule. The escalation counts within one kind of
+  limit, so a secondary report no longer inherits the point-budget schedule and
+  silences notifications for half an hour.
+- `pr_watch_list` renders each watch's last poll time, so a cycle that stopped
+  running is visible in the listing instead of only as absent notifications.
 - Delivered notifications carry a producer-owned message source. The source
   used to be the released `{ kind: 'plugin', plugin: 'dsh-pr-watcher' }`
   wrapper, which session format v4 refuses at admission, so a notification was

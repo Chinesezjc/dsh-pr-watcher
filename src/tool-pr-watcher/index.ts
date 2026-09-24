@@ -382,11 +382,12 @@ export function apply(ctx: Context): void {
         const lines = watches.map((watch) => {
           const state = watch.state === undefined ? 'no snapshot yet' : watch.state
           const checks = watch.checks === undefined ? '' : `; ${watch.checks}`
+          const polled = watch.lastPolledAt === undefined ? '' : `; last polled ${watch.lastPolledAt}`
           const error = watch.lastError === undefined ? '' : `; last error: ${watch.lastError}`
           return `${watch.id}: ${watch.target} ${state}${checks}`
             + ` (satisfied=${watch.satisfied}, notified=${watch.notified}, changes=${watch.notifyChanges}`
             + `, own-comment-filter=${watch.ignoreOwnComments})`
-            + ` -> ${watch.sessionId}${error}`
+            + ` -> ${watch.sessionId}${polled}${error}`
         })
         return [{ type: 'text', text: lines.join('\n') }]
       },

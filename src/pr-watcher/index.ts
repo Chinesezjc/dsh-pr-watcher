@@ -129,10 +129,19 @@ function backoffDelay(failures: number): number {
   return Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (failures - 1))
 }
 
-/** First pause when GitHub reports a rate limit; doubles per consecutive report. */
+/** First pause when GitHub reports an exhausted point budget; doubles per consecutive report. */
 const THROTTLE_BASE_MS = 120_000
-/** Ceiling for the service-wide rate-limit pause. */
+/** Ceiling for the service-wide pause after an exhausted point budget. */
 const THROTTLE_MAX_MS = 1_800_000
+/**
+ * First pause after a secondary (abuse-detection) rate limit; doubles per
+ * consecutive report. GitHub's secondary limit clears in minutes, so pausing
+ * for the point-budget ceiling would silence the service long after the limit
+ * lifted.
+ */
+const THROTTLE_SECONDARY_BASE_MS = 60_000
+/** Ceiling for the service-wide pause after a secondary rate limit. */
+const THROTTLE_SECONDARY_MAX_MS = 300_000
 /** Delay between two watch polls inside one cycle, so a cycle never bursts. */
 const POLL_PACING_MS = 250
 
@@ -146,6 +155,30 @@ const POLL_PACING_MS = 250
  */
 export function isRateLimitMessage(message: string): boolean {
   return /rate.?limit/i.test(message)
+}
+
+/**
+ * Whether a rate-limit failure is GitHub's secondary (abuse-detection) limit
+ * rather than an exhausted point budget. The two need different pauses: the
+ * point budget resets on an hourly window, while the secondary limit clears in
+ * minutes. Recognized from the failure text, because the secondary limit does
+ * not appear in `gh api rate_limit`.
+ * @param message - the failure text.
+ * @returns whether the failure is the secondary limit.
+ */
+export function isSecondaryRateLimitMessage(message: string): boolean {
+  return /secondary rate limit|abuse/i.test(message)
+}
+
+/**
+ * Identity of one fetch target. Watches that name the same pull request or the
+ * same branch head read one snapshot per cycle, so the key decides which
+ * watches share a request.
+ * @param target - the parsed target of a watch.
+ * @returns the key.
+ */
+function targetKey(target: { repo: string; number: number } | { repo: string; branch: string }): string {
+  return 'number' in target ? `${target.repo}#${target.number}` : `${target.repo}@${target.branch}`
 }
 
 /**
@@ -217,6 +250,16 @@ const configWatchSchema = z.object({
 export interface Config {
   /** Interval between poll cycles; overlapping cycles are skipped, not queued. */
   readonly pollIntervalMs: number
+  /**
+   * Ceiling on the service's own GitHub GraphQL consumption, in points per
+   * hour. One watch poll costs one point, and the account-wide budget (5000
+   * points per hour) is shared with every other client using the same `gh`
+   * account, so a large watch set would otherwise spend it alone and stall
+   * every watch once the budget is gone. When the distinct watched targets
+   * would exceed this ceiling, the effective poll interval stretches past
+   * `pollIntervalMs`. 0 disables the ceiling.
+   */
+  readonly maxPointsPerHour: number
   /** Path or name of the `gh` executable. */
   readonly ghPath: string
   /** Per-`gh`-call timeout. */
@@ -270,6 +313,12 @@ export interface ConfigWatch {
 const configSchema: Schemastery = z.object({
   /** Interval between poll cycles; overlapping cycles are skipped, not queued. */
   pollIntervalMs: z.natural().min(30000).max(3_600_000).default(60000),
+  /**
+   * Ceiling on this service's GitHub GraphQL points per hour, shared with every
+   * other client on the same `gh` account. The effective interval stretches past
+   * `pollIntervalMs` when the watched targets would exceed it. 0 disables it.
+   */
+  maxPointsPerHour: z.natural().max(100_000).default(2400),
   /** Path or name of the `gh` executable. */
   ghPath: z.string().default('gh'),
   /** Per-`gh`-call timeout. */
@@ -308,6 +357,7 @@ export class PrWatcherService extends Service {
   static Config = configSchema
 
   private readonly pollIntervalMs: number
+  private readonly maxPointsPerHour: number
   private readonly ghPath: string
   private readonly ghTimeoutMs: number
   private readonly delivery: DeliveryMode
@@ -326,12 +376,17 @@ export class PrWatcherService extends Service {
   private throttleUntil = 0
   /** Consecutive rate-limit reports, driving the throttle pause length. */
   private throttleReports = 0
+  /** Whether the pause in force came from the secondary limit, not the point budget. */
+  private throttleSecondary = false
+  /** Budget-stretched interval the last warning named, so it is logged once per value. */
+  private warnedIntervalMs = 0
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'prWatcher')
     // The cordis composition loader resolves schemastery defaults before the
     // constructor; raw mounts may not, so every field keeps a fallback.
     this.pollIntervalMs = config.pollIntervalMs ?? 60000
+    this.maxPointsPerHour = config.maxPointsPerHour ?? 2400
     this.ghPath = config.ghPath ?? 'gh'
     this.ghTimeoutMs = config.ghTimeoutMs ?? 30000
     this.delivery = config.delivery ?? 'steer'
@@ -393,7 +448,14 @@ export class PrWatcherService extends Service {
       let timer: ReturnType<typeof setTimeout> | undefined
       let inFlight = false
       const schedule = (): void => {
-        timer = setTimeout(() => { void run() }, this.pollIntervalMs)
+        const interval = this.effectiveIntervalMs()
+        if (interval > this.pollIntervalMs && interval !== this.warnedIntervalMs) {
+          this.warnedIntervalMs = interval
+          this.ctx.logger.warn(`pr-watcher: ${this.watches.size} watches on ${this.distinctTargets()} targets exceed`
+            + ` maxPointsPerHour=${this.maxPointsPerHour}; polling every ${Math.round(interval / 1000)}s`
+            + ` instead of ${Math.round(this.pollIntervalMs / 1000)}s`)
+        }
+        timer = setTimeout(() => { void run() }, interval)
       }
       const run = async (): Promise<void> => {
         if (inFlight) return
@@ -739,24 +801,92 @@ export class PrWatcherService extends Service {
     await new Promise<void>((resolve) => { setTimeout(resolve, ms) })
   }
 
+  /** Number of distinct fetch targets across the registered watches. */
+  private distinctTargets(): number {
+    return new Set([...this.watches.values()].map((state) => targetKey(specTarget(state.spec)))).size
+  }
+
   /**
-   * Poll every registered watch once, spaced by a short pacing delay so one
-   * cycle never issues every request at the same moment: a burst of requests
-   * is what trips GitHub's secondary rate limit. A rate limit pauses the whole
-   * service (see {@link PrWatcherService.pollWatch}), so the cycle stops
-   * instead of spending the remaining watches on calls that cannot succeed.
+   * Delay before the next poll cycle. `pollIntervalMs` is the floor; the
+   * configured point budget stretches it when the watched targets would cost
+   * more GraphQL points per hour than this service may spend, because that
+   * budget is shared with every other client on the same account.
+   * @returns the delay in milliseconds.
+   */
+  protected effectiveIntervalMs(): number {
+    if (this.maxPointsPerHour <= 0) return this.pollIntervalMs
+    // One query per target per cycle, and one point per query.
+    const budgetInterval = Math.ceil((this.distinctTargets() * 3_600_000) / this.maxPointsPerHour)
+    return Math.max(this.pollIntervalMs, budgetInterval)
+  }
+
+  /**
+   * Poll every registered watch once. Watches that target the same pull request
+   * or branch head share one fetch per cycle: a snapshot belongs to the target,
+   * not to the watch, so N watches on one PR must not cost N GitHub requests.
+   * Groups are spaced by a short pacing delay so one cycle never issues every
+   * request at the same moment: a burst of requests is what trips GitHub's
+   * secondary rate limit. A rate limit pauses the whole service (see
+   * {@link PrWatcherService.noteThrottle}), so the cycle stops instead of
+   * spending the remaining groups on calls that cannot succeed.
    */
   private async pollAll(): Promise<void> {
     if (this.throttled()) return
-    const states = [...this.watches.values()]
-    const paceMs = states.length > 1
-      ? Math.max(0, Math.min(POLL_PACING_MS, Math.floor(this.pollIntervalMs / states.length)))
+    const groups = new Map<string, WatchState[]>()
+    for (const state of this.watches.values()) {
+      if (this.now() < state.nextAttemptAt) continue
+      const key = targetKey(specTarget(state.spec))
+      const group = groups.get(key)
+      if (group === undefined) groups.set(key, [state])
+      else group.push(state)
+    }
+    const paceMs = groups.size > 1
+      ? Math.max(0, Math.min(POLL_PACING_MS, Math.floor(this.pollIntervalMs / groups.size)))
       : 0
-    for (const [index, state] of states.entries()) {
+    let index = 0
+    for (const group of groups.values()) {
       if (this.throttled()) return
       if (index > 0 && paceMs > 0) await this.pace(paceMs)
-      await this.pollWatch(state)
+      index += 1
+      await this.pollGroup(group)
     }
+  }
+
+  /**
+   * Fetch one target once and apply the result to every watch on it. A fetch
+   * failure marks each member watch with that failure and its own backoff
+   * window, so one unreachable target does not stop the other groups.
+   * @param group - the watches sharing this target; never empty.
+   */
+  private async pollGroup(group: WatchState[]): Promise<void> {
+    const first = group[0]
+    if (first === undefined || this.throttled()) return
+    // A member without a snapshot needs the conversation window, so the shared
+    // fetch must not satisfy itself from another member's stored window. A
+    // member whose stored window is older than the one used here (a watch that
+    // was backing off while its target was polled) still sees the count change;
+    // it reports that change without an embedded comment body for one cycle.
+    const prev = group.some((state) => state.snapshot === undefined) ? undefined : first.snapshot
+    let snapshot: WatchSnapshot
+    try {
+      snapshot = await this.fetchSnapshot(specTarget(first.spec), prev)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      for (const state of group) {
+        state.failures += 1
+        state.nextAttemptAt = this.now() + backoffDelay(state.failures)
+        state.lastError = message
+        state.lastPolledAt = new Date().toISOString()
+      }
+      if (isRateLimitMessage(message)) {
+        this.noteThrottle(message)
+        return
+      }
+      this.ctx.logger.warn(`pr-watcher: target "${targetKey(specTarget(first.spec))}" fetch failed: ${message}`
+        + ` (backing off ${backoffDelay(first.failures) / 1000}s)`)
+      return
+    }
+    for (const state of group) await this.applySnapshot(state, snapshot)
   }
 
   /** Whether the service is inside a rate-limit pause. */
@@ -768,45 +898,44 @@ export class PrWatcherService extends Service {
    * Record one GitHub rate-limit report and pause every watch. Pausing the
    * service, rather than only the failing watch, is what lets the account
    * recover: retrying the other watches into a throttled account keeps the
-   * throttle hot and delays the reset.
-   * @param message - the failure text, used for the log line.
+   * throttle hot and delays the reset. The pause schedule follows what was
+   * reported: an exhausted point budget refills on its hourly window, while the
+   * secondary (abuse-detection) limit clears in minutes, so each escalates from
+   * its own base to its own ceiling.
+   * @param message - the failure text; selects the pause schedule and is logged.
    */
   private noteThrottle(message: string): void {
+    const secondary = isSecondaryRateLimitMessage(message)
+    if (secondary !== this.throttleSecondary) {
+      this.throttleSecondary = secondary
+      this.throttleReports = 0
+    }
     this.throttleReports += 1
-    const pause = Math.min(THROTTLE_MAX_MS, THROTTLE_BASE_MS * 2 ** (this.throttleReports - 1))
+    const base = secondary ? THROTTLE_SECONDARY_BASE_MS : THROTTLE_BASE_MS
+    const ceiling = secondary ? THROTTLE_SECONDARY_MAX_MS : THROTTLE_MAX_MS
+    const pause = Math.min(ceiling, base * 2 ** (this.throttleReports - 1))
     const first = !this.throttled()
     this.throttleUntil = this.now() + pause
     if (first) {
-      this.ctx.logger.warn(`pr-watcher: GitHub rate limit reported (${message}); pausing every watch`
-        + ` for ${Math.round(pause / 1000)}s`)
+      this.ctx.logger.warn(`pr-watcher: GitHub ${secondary ? 'secondary ' : ''}rate limit reported (${message});`
+        + ` pausing every watch for ${Math.round(pause / 1000)}s`)
     }
   }
 
-  /** Poll one watch: refresh the snapshot and handle notification edges. */
-  private async pollWatch(state: WatchState): Promise<void> {
-    if (this.throttled() || this.now() < state.nextAttemptAt) return
+  /**
+   * Apply one fetched snapshot to a watch: refresh its state, then deliver the
+   * notification its edges call for. The snapshot may be shared with every
+   * other watch on the same target.
+   * @param state - the watch to update.
+   * @param fetched - the snapshot fetched for its target.
+   */
+  private async applySnapshot(state: WatchState, fetched: WatchSnapshot): Promise<void> {
     const prev = state.snapshot
-    let snapshot: WatchSnapshot
-    try {
-      snapshot = await this.fetchSnapshot(specTarget(state.spec), prev)
-    } catch (error) {
-      state.failures += 1
-      state.nextAttemptAt = this.now() + backoffDelay(state.failures)
-      state.lastError = error instanceof Error ? error.message : String(error)
-      state.lastPolledAt = new Date().toISOString()
-      if (isRateLimitMessage(state.lastError)) {
-        this.noteThrottle(state.lastError)
-        return
-      }
-      this.ctx.logger.warn(`pr-watcher: watch "${state.spec.id}" fetch failed: ${state.lastError}`
-        + ` (backing off ${backoffDelay(state.failures) / 1000}s)`)
-      return
-    }
     state.failures = 0
     state.nextAttemptAt = 0
     this.throttleReports = 0
     this.throttleUntil = 0
-    snapshot = carryForwardMergeable(snapshot, prev)
+    const snapshot = carryForwardMergeable(fetched, prev)
     state.snapshot = snapshot
     state.lastError = undefined
     state.lastPolledAt = new Date().toISOString()

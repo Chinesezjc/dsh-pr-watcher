@@ -238,15 +238,21 @@ and backs off that watch exponentially (30s doubling to a 10min ceiling). A PR
 or repository that does not exist reports `not found` and keeps the watch in
 the error state; call `pr_status` to re-check, or remove the watch.
 
-A rate limit is handled service-wide: watches are polled 250ms apart so a cycle
-never bursts its requests, and a rate-limit failure pauses EVERY watch for 120s
-(doubling to a 30min ceiling on consecutive reports) instead of only the watch
-that failed. While paused, `pr_watch_list` keeps showing the rate-limit
+A rate limit is handled service-wide: one query is issued per distinct target
+(watches naming the same pull request or branch head share it) with a 250ms gap
+between queries so a cycle never bursts its requests, and a rate-limit failure
+pauses EVERY watch instead of only the target that failed. The pause follows
+what GitHub reported: the secondary (abuse) limit pauses 60s doubling to a 5min
+ceiling, an exhausted GraphQL point budget pauses 120s doubling to a 30min
+ceiling. While paused, `pr_watch_list` keeps showing the rate-limit
 `lastError` and no snapshot updates arrive; polling resumes on its own once the
 pause expires, and a successful poll ends it early. GitHub's secondary rate
 limit does not appear in `gh api rate_limit`, so a pause can be the only
-symptom; if polls stay paused for a long time, reduce the number of watches,
-raise `pollIntervalMs`, or drop duplicate watches on the same PR.
+symptom. A large watch set can outspend the account-wide point budget (shared
+with every other client on the same `gh` account); `maxPointsPerHour` (default
+2400) stretches the effective interval to keep this service inside its share,
+and `pr_watch_list` shows each watch's last poll time, so a stalled cycle is
+visible in the listing.
 
 ## Operational notes
 

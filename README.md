@@ -29,14 +29,19 @@ name is baked into this plugin.
 - A **watch** targets one pull request (`owner/name` + number) or one branch
   head (`owner/name` + branch), selects conditions, and names a target session
   that receives notifications.
-- The service polls every watch on `pollIntervalMs` (default 60s) through
-  `gh api graphql` with one query per target, paced 250ms apart so a cycle
+- The service polls on `pollIntervalMs` (default 60s) through `gh api graphql`,
+  with one query per distinct target — every watch naming the same pull request
+  or branch head shares that query — and a 250ms gap between queries so a cycle
   never issues every request at the same moment. Overlapping poll cycles are
-  skipped, never queued. A rate-limit failure (primary or secondary, which
-  `gh api rate_limit` does not report) pauses EVERY watch for 120s, doubling
-  to a 30min ceiling on consecutive reports, because retrying the remaining
-  watches into a throttled account only keeps the throttle hot; a successful
-  poll ends the pause.
+  skipped, never queued. The account-wide GraphQL budget is 5000 points per
+  hour and is shared with every other client using the same `gh` account, so
+  `maxPointsPerHour` (default 2400) stretches the effective interval past
+  `pollIntervalMs` when the watched targets would exceed it. A rate-limit
+  failure pauses EVERY watch, because retrying the remaining targets into a
+  throttled account only keeps the throttle hot; the pause follows what was
+  reported: the secondary limit (which `gh api rate_limit` does not show)
+  pauses 60s doubling to a 5min ceiling, an exhausted point budget pauses 120s
+  doubling to a 30min ceiling, and a successful poll ends the pause.
 - A watch is **satisfied** when all its selected conditions hold. The
   satisfaction notification is edge-triggered: delivered exactly once, on the
   flip from not-satisfied to satisfied, then never again for that watch.
@@ -215,7 +220,10 @@ neither), and a branch watch that carries conditions or disables change
 notifications all fail at load.
 
 The `gh` binary path and per-call timeout are configurable (`ghPath`,
-`ghTimeoutMs`). The minimum poll interval is 30s. Set `stateFile` to a file
+`ghTimeoutMs`). The minimum poll interval is 30s, and `maxPointsPerHour`
+(default 2400) caps this service's share of the account-wide GraphQL budget by
+stretching the effective interval when the watched targets would exceed it; set
+it to 0 to disable the cap. Set `stateFile` to a file
 path to persist the runtime watch set across process restarts:
 
 ```yaml
@@ -325,9 +333,13 @@ without parsing the message text.
 
 GitHub's secondary rate limit is not visible in `gh api rate_limit`, so it is
 recognized from the failure text; the pause applies service-wide rather than
-per watch, and the first report of a pause is logged with its length. A poll
-cycle stops as soon as a watch reports a rate limit instead of spending its
-remaining watches on calls that cannot succeed.
+per target, and the first report of a pause is logged with its length. A
+secondary limit pauses 60s doubling to a 5min ceiling, because it clears in
+minutes; an exhausted point budget pauses 120s doubling to a 30min ceiling,
+because it refills on an hourly window. The escalation counts within one kind of
+limit, so a secondary report does not inherit the point-budget schedule. A poll
+cycle stops as soon as a target reports a rate limit instead of spending its
+remaining targets on calls that cannot succeed.
 
 Resolving the authenticated login (`gh api user`) happens once per process on
 the first watch that needs it; a failure logs a warning, leaves own-comment
