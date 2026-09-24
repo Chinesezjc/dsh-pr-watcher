@@ -13,6 +13,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import {
@@ -89,8 +90,19 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Plugin identity attached to delivered messages. */
-const PLUGIN_SOURCE = 'dsh-pr-watcher'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /**
+     * Attribution of a notification this plugin delivered. Session format V4
+     * refuses the retired `{ kind: 'plugin', plugin }` wrapper, so the producer
+     * kind stands alone: the name is exactly what the harness's V3-to-V4
+     * migration writes for this plugin's already-persisted notifications
+     * (`plugin:` plus the original plugin name), keeping migrated rows and rows
+     * written from now on under one producer identity.
+     */
+    'plugin:dsh-pr-watcher': { readonly kind: 'plugin:dsh-pr-watcher' } & ContextFormed
+  }
+}
 
 /** One registered watch plus its runtime state. */
 interface WatchState {
@@ -877,8 +889,7 @@ export class PrWatcherService extends Service {
     }
     const message = createUserMessage({
       source: {
-        kind: 'plugin',
-        plugin: PLUGIN_SOURCE,
+        kind: 'plugin:dsh-pr-watcher',
         form: 'notice',
         summary: boundContextSummary('PR watch notification'),
       },

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.0
+
+- Delivered notifications carry a producer-owned message source. The source
+  used to be the released `{ kind: 'plugin', plugin: 'dsh-pr-watcher' }`
+  wrapper, which session format v4 refuses at admission, so a notification was
+  rejected as it entered the session instead of reaching it. It is now
+  `{ kind: 'plugin:dsh-pr-watcher', form: 'notice', summary: … }` — the form the
+  harness's v3-to-v4 migration writes for this plugin's already-persisted
+  notifications, so migrated rows and new deliveries attribute to one producer.
+
 ## 0.14.0
 
 - An indefinite mergeability is no longer a state: GitHub computes a pull

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import PrWatcherService, { carryForwardMergeable, isRateLimitMessage } from '../src/pr-watcher/index.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { BranchSnapshot, ConversationEntry, PrSnapshot, WatchNotifyInfo } from '../src/pr-watcher/types.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -42,12 +43,19 @@ function fakeAgents(options: {
   headers?: Map<string, { origin?: string; parentSession?: string }>
   delivered?: Map<string, string[]>
   methods?: Map<string, string[]>
+  sources?: Map<string, MessageSource[]>
 } = {}) {
-  const { liveIds = [], headers = new Map(), delivered = new Map(), methods = new Map() } = options
-  const record = (id: string, method: string) => (message: { content: readonly { type: 'text'; text: string }[] }): void => {
+  const { liveIds = [], headers = new Map(), delivered = new Map(), methods = new Map(), sources = new Map() } = options
+  const record = (id: string, method: string) => (message: {
+    content: readonly { type: 'text'; text: string }[]
+    source: MessageSource
+  }): void => {
     const texts = delivered.get(id) ?? []
     for (const block of message.content) texts.push(block.text)
     delivered.set(id, texts)
+    const recorded = sources.get(id) ?? []
+    recorded.push(message.source)
+    sources.set(id, recorded)
     const called = methods.get(id) ?? []
     called.push(method)
     methods.set(id, called)
@@ -122,14 +130,16 @@ async function mounted(config: Record<string, unknown> = {}, agentsOptions: Para
   service: TestService
   delivered: Map<string, string[]>
   methods: Map<string, string[]>
+  sources: Map<string, MessageSource[]>
   notifications: WatchNotifyInfo[]
   dispose: () => Promise<void>
 }> {
   const ctx = new Context()
   const delivered = new Map<string, string[]>()
   const methods = new Map<string, string[]>()
+  const sources = new Map<string, MessageSource[]>()
   const notifications: WatchNotifyInfo[] = []
-  ctx.provide('agents', fakeAgents({ ...agentsOptions, delivered, methods }) as never)
+  ctx.provide('agents', fakeAgents({ ...agentsOptions, delivered, methods, sources }) as never)
   const fiber = await ctx.plugin(TestService, { pollIntervalMs: 30000, ...config })
   const service = ctx.prWatcher as unknown as TestService
   ctx.on('pr-watcher/notify', (info) => notifications.push(info))
@@ -138,6 +148,7 @@ async function mounted(config: Record<string, unknown> = {}, agentsOptions: Para
     service,
     delivered,
     methods,
+    sources,
     notifications,
     dispose: async () => { await fiber.dispose() },
   }
@@ -242,7 +253,7 @@ describe('watch registry', () => {
 
 describe('poll transitions', () => {
   it('delivers exactly once on the satisfied edge', async () => {
-    const { service, delivered, dispose } = await mounted({}, { liveIds: ['sess-1'] })
+    const { service, delivered, sources, dispose } = await mounted({}, { liveIds: ['sess-1'] })
     service.watch(WATCH)
     const seq = [
       snapshot({ checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
@@ -256,6 +267,14 @@ describe('poll transitions', () => {
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)
     expect(delivered.get('sess-1')![0]).toContain('conditions met')
+    // The notification's durable source is producer-owned. Session format V4
+    // refuses the retired `{ kind: 'plugin', plugin }` wrapper, so a delivery
+    // carrying it fails admission instead of reaching the session.
+    expect(sources.get('sess-1')).toEqual([{
+      kind: 'plugin:dsh-pr-watcher',
+      form: 'notice',
+      summary: 'PR watch notification',
+    }])
     await (service as unknown as { pollAll(): Promise<void> }).pollAll()
     expect(delivered.get('sess-1')).toHaveLength(1)
     const status = service.list()[0]!
